@@ -53,10 +53,10 @@ scripts/remove-product.sh <name> --yes   # DESTRUCTIVE
 
 Done and verified this session: infra smoke 27/27; flariane pytest 155/155 on Postgres 17; flariane e2e 99/101 through Caddy.
 
-**Immediate next action (small):** make flariane e2e fully green. The 2 failing checks are:
-- "public info: support WhatsApp number is set" -> set `support_whatsapp` in flariane's admin settings
-- "public info: payment accounts offered" -> set a Wave number in settings
-These are rows in flariane's settings (fresh `db_flariane` has none). Seed them (admin API or a seed command), rerun `platform/tests/e2e_flariane.sh`, expect 101/101. Then add a `seed` step to the flariane compose/README so a new environment has them.
+**Immediate next action (small):** the 2 e2e failures are expected on a fresh database, not a defect and not something to seed in the platform. Per owner, the support WhatsApp number and the Wave payment number are entered from the admin app (settings), so a new `db_flariane` has none until an admin sets them:
+- "public info: support WhatsApp number is set" -> `support_whatsapp` setting
+- "public info: payment accounts offered" -> Wave number setting
+Options (owner to choose): (a) leave as is and treat 99/101 as the baseline for an unconfigured environment, (b) make `backend/e2e/run_e2e.py` set both through the admin settings API as a precondition (the same call the admin app makes), so a fresh environment reaches 101/101. Platform rule meanwhile: **never copy these values from Render or hardcode them in the platform; they stay admin-managed data** (a DB restore carries them, a new empty DB does not, so a restore/migration of the live flariane DB must be followed by checking both settings in the admin app).
 
 **Changes made in the flariane repo (NOT committed there yet, review and commit):**
 - `backend/Dockerfile`, `backend/.dockerignore`, `compose.platform.yaml` (new)
