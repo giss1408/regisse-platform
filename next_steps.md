@@ -95,3 +95,6 @@ Consequences already written in the plan: `auth` is extracted mainly from **fide
 ### Update (owner, same day): fidelia login follows the flariane model
 A Fidelia member (agent/admin) registers the merchant in the admin app (shop, location, phone); the code reaches the merchant by WhatsApp from the admin app (wa.me link, server-built); merchant sets a password, then phone + password. Business API replaces the relay later. Written as plan section 6e; decision 8 closed.
 Open, need the owner: 11 step-up factor for money actions (proposal: TOTP for owners/agents/admins), 12 customers of fidelia-App-user (proposal: keep automatic SMS code until Business API is live), 9 fidelia phone keys via `ph` claim (lean yes), 10 compliance check.
+
+### Fidelia enrolment fields (confirmed by owner, matches `POST /api/admin/venues`)
+Agent creates the shop with: category, name, commune, address, opening hours, shop phone, wallet (provider + account) and the merchant's own phone (login; mandatory for agents). Added in plan 6e: an agent-entered **wallet is "unconfirmed" until the owner confirms it in Fidelia Pro** (password + TOTP), so a typo or fraud cannot redirect payouts; the pay QR stays inactive until then.
