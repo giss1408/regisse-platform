@@ -1,0 +1,30 @@
+SHELL := /bin/bash
+.PHONY: init up down ps logs new-product backup restore-test smoke clean-demo
+
+init:            ## create .env with generated secrets (idempotent)
+	@scripts/init.sh
+
+up:              ## start shared infra
+	docker compose up -d --wait
+	@scripts/harden-redis.sh
+
+down:
+	docker compose down
+
+ps:
+	docker compose ps
+
+logs:
+	docker compose logs -f --tail=100
+
+new-product:     ## make new-product NAME=tourism [POSTGIS=1] [UPSTREAM=tourism-web:8000]
+	@scripts/new-product.sh $(NAME) $(if $(POSTGIS),--postgis,) $(if $(UPSTREAM),--upstream $(UPSTREAM),)
+
+backup:
+	@scripts/backup.sh
+
+restore-test:
+	@scripts/restore-test.sh
+
+smoke:           ## end-to-end smoke test of the infra (uses a throwaway demo product)
+	@tests/smoke.sh

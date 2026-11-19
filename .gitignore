@@ -1,0 +1,10 @@
+infra/.env
+infra/secrets/*
+!infra/secrets/.gitkeep
+infra/backups/*
+!infra/backups/.gitkeep
+infra/conf.d/*.caddy
+!infra/conf.d/.gitkeep
+**/__pycache__/
+.venv/
+*.pyc

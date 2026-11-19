@@ -1,0 +1,83 @@
+name: infra
+
+# Shared infrastructure: reverse proxy, Postgres (PostGIS), Redis.
+# Products run in their own compose projects and join the network `infra_net`.
+# Nothing here publishes DB/Redis ports; only Caddy publishes HTTP(S).
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      CADDY_GLOBAL_OPTS: ${CADDY_GLOBAL_OPTS:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./conf.d:/etc/caddy/conf.d:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [infra_net]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make init}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1536MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-4GB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [infra_net]
+    mem_limit: ${PG_MEM_LIMIT:-3g}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_ADMIN_PASSWORD: ${REDIS_ADMIN_PASSWORD:?run make init}
+    # ACL file keeps per-product users across restarts (written by new-product.sh via ACL SAVE).
+    command: ["sh", "-c", "touch /data/users.acl && exec redis-server --aclfile /data/users.acl --appendonly yes --maxmemory ${REDIS_MAXMEMORY:-512mb} --maxmemory-policy noeviction"]
+    volumes:
+      - redisdata:/data
+    networks: [infra_net]
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_ADMIN_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+networks:
+  infra_net:
+    name: infra_net
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

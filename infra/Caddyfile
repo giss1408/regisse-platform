@@ -1,0 +1,14 @@
+{
+	email {$ACME_EMAIL}
+	admin 127.0.0.1:2019
+	{$CADDY_GLOBAL_OPTS}
+}
+
+# One snippet per product, written by scripts/new-product.sh
+import /etc/caddy/conf.d/*.caddy
+
+# Fallback: unknown hosts get nothing useful.
+:80 {
+	respond /healthz "ok" 200
+	respond 404
+}
