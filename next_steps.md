@@ -91,3 +91,7 @@ Consequences already written in the plan: `auth` is extracted mainly from **fide
 8. Login model in the one user pool: SMS-code (fidelia) vs password (flariane); my lean = support both per user.
 9. Keep fidelia's phone keys via the `ph` claim for now, UUID migration later (lean: yes).
 10. BCEAO / ARTCI compliance check before Phase 7.
+
+### Update (owner, same day): fidelia login follows the flariane model
+A Fidelia member (agent/admin) registers the merchant in the admin app (shop, location, phone); the code reaches the merchant by WhatsApp from the admin app (wa.me link, server-built); merchant sets a password, then phone + password. Business API replaces the relay later. Written as plan section 6e; decision 8 closed.
+Open, need the owner: 11 step-up factor for money actions (proposal: TOTP for owners/agents/admins), 12 customers of fidelia-App-user (proposal: keep automatic SMS code until Business API is live), 9 fidelia phone keys via `ph` claim (lean yes), 10 compliance check.
