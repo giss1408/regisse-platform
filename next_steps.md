@@ -15,7 +15,7 @@ The other apps are not finished: do NOT migrate or add tests for them until the 
 | 2b. flariane onto the platform (Dockerfile, compose.platform.yaml, db_flariane, Caddy route, Celery worker) | DONE | web + worker healthy behind Caddy at `flariane-api.localhost:8080` |
 | 2c. flariane regression: pytest on Postgres 17 + e2e through Caddy | DONE | pytest **155 passed** with the kit (PG17); e2e `tests/e2e_flariane.sh` **101/101** with the kit |
 | 3. `regisse_kit` v0.1, extracted from flariane only | DONE | `platform/kit`: 38 tests (incl. flariane parity vectors); adopted in flariane via thin wrappers; flariane pytest 155/155 and e2e 101/101 after adoption |
-| 3b. `auth` service (flariane wa.me pattern, JWKS, memberships); flariane is the only consumer, then its e2e again | TODO | |
+| 3b. `auth` service v0.1 (`platform/auth`) | DONE as a service; flariane NOT yet a consumer | 23 unit/integration tests (PG17), e2e through Caddy 32/32, kit 49 tests incl. `regisse_kit.sso` |
 | 4-5. Other products | PARKED (not finished by owner) | |
 | 6. Final e2e (flariane through infra + auth) | TODO | |
 | 1b. Hetzner + Cloudflare + R2 | TODO (owner accounts) | |
@@ -125,3 +125,21 @@ Still open: BCEAO/ARTCI check, email provider for fallback.
 
 ## Next (not started)
 Step 3b `auth` service: sources = fidelia `core/otp.py`, `api/auth.py`, `api/account.py`, `services/otp_sender.py` and flariane password/TOTP/wa.me code, via `regisse_kit`; then flariane becomes its first consumer (rerun the flariane e2e). Needed from the owner before/while building: BCEAO/ARTCI check (before Phase 7), email provider for the fallback channel. Owner actions for production unchanged (Hetzner, Cloudflare + Namecheap DNS move, R2 + age key, Meta WhatsApp Business).
+
+## Step 3b result: `auth` service v0.1 (2026-11-19)
+
+Built in `platform/auth` (FastAPI, SQLAlchemy async, Alembic, Ed25519 JWT via JWKS, reuses `regisse_kit`):
+register -> relay queue -> admin sends wa.me code -> activate -> login (phone + password; TOTP for staff roles) -> access token (EdDSA, 10 min, claims `sub` uuid, `ph`, `aud`, `role`, `roles`, `app`, `amr`, `auth_time`, `sid`, `mcp`) + rotating refresh with reuse detection -> logout; password reset via relay with forced-change temp password; admin: relay queue/send/reject, search, disable/enable, revoke sessions, grant/revoke memberships (staff roles super admin only); `POST /v1/introspect` with service keys; JWKS + `kid` rotation (`app.cli rotate-key`); audit log without secrets/full phones; privileged accounts never go through the relay; per-phone login lockout; TOTP replay protection. `regisse_kit.sso.SsoVerifier` (algorithm pinned to EdDSA, aud/iss mandatory, role mandatory, JWKS cache with 30 s refetch floor, `require_role`, `require_step_up`).
+Verified: auth tests 23/23 (`cd platform/auth && make test`), auth e2e 32/32 (`bash platform/tests/e2e_auth.sh`, includes a product-side verification with kit.sso against the live JWKS), kit 49/49 (`cd platform/kit && make test`), infra smoke 27/27 rerun, flariane unchanged since its last green run (155 pytest, 101/101 e2e).
+Deployed locally: product `auth` on infra (db_auth, redis db 4), `auth-api.localhost:8080`, container `auth-web`. Secrets in `platform/auth/.env.platform` and `infra/secrets/e2e_auth.env` (both gitignored).
+
+### Known gaps (honest list, in priority order)
+1. **No endpoint to create staff accounts** (admin/agent/operator): today only `python -m app.cli create-admin`. Plan says the super admin creates admins and agents: needs `POST /v1/admin/staff` (super admin only, returns the TOTP provisioning URI once; agents without TOTP per owner decision) and a password-set flow for them.
+2. **Flariane is not a consumer yet.** Next big step: dual-accept in flariane (its own tokens + auth tokens, mapped by `ph`/phone hash), then migrate its customers/admins into `db_auth` with the legacy mapping table, then rerun flariane pytest + e2e. Flariane admins have device approval and TOTP of their own (to map to `super_admin/operator/viewer` memberships).
+3. No per-IP limit on `/v1/activate` and `/v1/refresh` (activation is capped per code: 5 attempts; an attacker can burn a victim's attempts, which only forces a new relay code).
+4. `/v1/introspect`: any product's service key can introspect any product's token (low risk, tighten to key-product = token `aud`).
+5. Fallback channels (SMS via fidelia's sender class, email) and the WhatsApp Cloud API `OtpChannel` are not implemented; relay (wa.me) only, as decided. No `OtpChannel` interface yet.
+6. No account-number-change/recovery flow, no account deletion/anonymisation, no consent-version management beyond a constant.
+7. No wallet-change confirmation purpose yet (fidelia Phase 7: generic "confirmation code" request purpose in the relay).
+8. Production hardening not done: Redis-backed limits are wired but untested at scale; signing-key rotation schedule/runbook; backups of `db_auth` are covered by the infra backup script but the encryption key backup (AUTH_FIELD_ENCRYPTION_KEY, AUTH_HASH_KEY) must be stored in a vault, losing them makes users unreadable.
+9. Security review of `auth` (planned gate before real users and before Phase 7) not done; mutation-style sanity checks of the security tests not done.
