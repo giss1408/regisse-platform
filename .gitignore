@@ -8,3 +8,4 @@ infra/conf.d/*.caddy
 **/__pycache__/
 .venv/
 *.pyc
+infra/e2e-state/
