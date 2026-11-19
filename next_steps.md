@@ -105,3 +105,7 @@ No SMS login: end customers also follow the flariane way (phone + password, one-
 ### Fidelia roles (owner answers)
 Admin and super admin use an authenticator code (TOTP); agents are created by the super admin. "Owner" was loose wording for the **`merchant` role** (shop owner/manager). Role table is in plan 6e: super_admin (new, created in person, 2+ recommended), admin, agent (super-admin-created, TOTP at login proposed because agents relay codes), merchant (TOTP only as step-up for wallet/payout settings), cashier (added by merchant, no TOTP), customer.
 Open: (a) TOTP at login for agents (proposal yes), (b) fidelia phone keys via `ph` claim, (c) BCEAO/ARTCI check.
+
+### Fidelia relay permissions (owner, final)
+Only `admin` and `super_admin` send activation/reset codes (relay queue in the admin app). Agents only enrol shops (pending until an admin sends the code, which doubles as review of the agent's data) and can be deactivated at any time by an admin or super admin (disable + session revoke). Agents need no TOTP; admin/super_admin use TOTP at login. Plan 6e role table and controls updated; decision 11 closed except the merchant wallet step-up (TOTP), still a proposal.
+Open: merchant TOTP step-up for wallet changes (confirm), fidelia phone keys via `ph` claim, BCEAO/ARTCI check, email provider for the fallback channel.
