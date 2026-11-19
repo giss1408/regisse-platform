@@ -61,6 +61,11 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class StepUpIn(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    totp: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+
 class DeleteMeIn(BaseModel):
     current_password: str = Field(min_length=1, max_length=200)
     check_only: bool = False  # verify the password and the right to delete, change nothing (lets the app check before it deletes elsewhere)
@@ -119,6 +124,16 @@ async def reset_request(data: ResetRequestIn, request: Request, db: AsyncSession
 async def change_password(data: ChangePasswordIn, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> None:
     await accounts.change_password(db, p.user_id, data.current_password, data.new_password, p.sid)
     await db.commit()
+
+
+@router.post("/step-up")
+async def step_up(data: StepUpIn, request: Request, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
+    """Re-prove who you are before a sensitive action (wallet, staff, exports...). Returns a NEW access token for the same session
+    with a fresh `auth_time`, and `amr` that says what was just proved (password, plus the authenticator code for roles that need
+    one). Products ask for a recent `auth_time` on their sensitive routes; a stolen access token alone cannot pass."""
+    out = await accounts.step_up(db, p, data.password, data.totp, client_ip(request))
+    await db.commit()
+    return out
 
 
 @router.post("/me/delete", status_code=204)

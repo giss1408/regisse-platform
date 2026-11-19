@@ -478,3 +478,46 @@ async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str
     user.status = "disabled"
     await revoke_all_sessions(db, user.id)
     await audit(db, actor_type="user", actor_id=user.id, action="user.erased", entity="user", entity_id=user.id, ip=ip)
+
+
+async def step_up(db: AsyncSession, p, password: str, totp: str | None, ip: str | None) -> dict:
+    """Fresh proof for the CURRENT session (same `sid`). Failures count like login failures (lockout, per-IP limit)."""
+    s = get_settings()
+    ip_limit(s.login_ip_limit, "login", ip)
+    user = await db.scalar(select(User).where(User.id == p.user_id).with_for_update())
+    if user is None or user.status != "active" or not user.password_hash:
+        raise Unauthorized("invalid_token")
+    fail_key = f"login-fail:{user.id}"
+    if not limiter().test(item(s.login_fail_limit), fail_key):
+        raise TooManyRequests("login_locked")
+    if not await to_thread.run_sync(verify_password, user.password_hash, password):
+        limiter().hit(item(s.login_fail_limit), fail_key)
+        raise Unauthorized("invalid_credentials")
+    cfg = product_config(p.product)
+    now = utcnow()
+    amr = ["pwd"]
+    if p.role in cfg.get("totp_roles", []) and not (user.totp_exempt and p.role not in ("super_admin", "admin")):
+        secret = cipher().decrypt(user.totp_secret_enc) if user.totp_secret_enc else None
+        step = int(now.timestamp()) // 30
+        code = (totp or "").strip()
+        valid_step = next((st for st in (step - 1, step, step + 1) if secret and pyotp.TOTP(secret).at(st * 30) == code), None) if code.isdigit() else None
+        if valid_step is None or valid_step <= user.totp_last_step:
+            limiter().hit(item(s.login_fail_limit), fail_key)
+            raise Unauthorized("invalid_totp")
+        user.totp_last_step = valid_step
+        amr.append("totp")
+    row = await db.scalar(select(RefreshToken).where(RefreshToken.family == p.sid, RefreshToken.revoked_at.is_(None)).limit(1))
+    if row is None:
+        raise Unauthorized("session_expired")  # the session was ended: a step-up cannot revive it
+    held = _roles_for(user, p.product)
+    if p.role not in held:
+        raise Forbidden("no_access_to_app")
+    lid = await db.scalar(select(LegacyIdentity.legacy_id).where(LegacyIdentity.product == (p.product if row.app == "customer" else f"{p.product}.{row.app}"), LegacyIdentity.user_id == user.id))
+    phone = user_phone(user)
+    ttl = timedelta(minutes=s.access_token_minutes)
+    access = await tokens.issue_access_token(
+        db, sub=user.id, phone_key=kit_phone.phone_key(phone) if phone else "", product=p.product, app=row.app, role=p.role, roles=held, amr=amr,
+        auth_time=now, sid=p.sid, must_change_password=False, ttl=ttl, legacy_id=lid,
+    )
+    await audit(db, actor_type="user", actor_id=user.id, action="user.step_up", entity="user", entity_id=user.id, ip=ip, detail={"product": p.product, "amr": amr})
+    return {"access_token": access, "token_type": "bearer", "expires_in": int(ttl.total_seconds()), "amr": amr}
