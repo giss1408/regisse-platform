@@ -108,3 +108,9 @@ def test_pending_password_change_can_be_forbidden():
     with pytest.raises(SsoError):
         v.verify(k.token(mcp=True)).forbid_pending_password_change()
     v.verify(k.token()).forbid_pending_password_change()
+
+
+def test_legacy_id_claim_is_exposed_when_present():
+    k = Keys(); v, _ = make(k)
+    assert v.verify(k.token(lid="16")).legacy_id == "16"
+    assert v.verify(k.token()).legacy_id is None

@@ -2,7 +2,7 @@
 
     AUTH_ADMIN_PASSWORD=... python -m app.cli create-admin --phone 0701020304 --name "Régis" --role super_admin
     python -m app.cli rotate-key
-    FLARIANE_DATABASE_URL=... FLARIANE_FIELD_ENCRYPTION_KEY=... python -m app.cli import-flariane [--apply]
+    FLARIANE_DATABASE_URL=... FLARIANE_FIELD_ENCRYPTION_KEY=... python -m app.cli import-flariane [--apply] [--refresh] [--cutover]
     python -m app.cli gen-keys
 """
 
@@ -55,7 +55,7 @@ def _naive_utc(dt):  # flariane stores timezone-aware timestamps; auth stores na
     return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt is not None else None
 
 
-async def import_flariane(apply: bool) -> None:
+async def import_flariane(apply: bool, refresh: bool = False, do_cutover: bool = False) -> None:
     """Dry-run by default. Reads flariane's `customers` table READ-ONLY with FLARIANE_DATABASE_URL and decrypts phones in memory
     with FLARIANE_FIELD_ENCRYPTION_KEY (neither is stored in auth)."""
     import json
@@ -93,7 +93,16 @@ async def import_flariane(apply: bool) -> None:
                          "reset_requested": r["password_reset_requested_at"] is not None})
     await engine.dispose()
     async with SessionLocal() as db:
-        stats = await import_rows(db, rows, product="flariane", role="customer", apply=apply)
+        stats = await import_rows(db, rows, product="flariane", role="customer", apply=apply, refresh=refresh or do_cutover)
+        if do_cutover:
+            if not apply:
+                stats["cutover"] = "would freeze credentials (add --apply)"
+            elif stats["errors"]:
+                raise SystemExit("refusing to cut over with errors; fix them and rerun:\n" + json.dumps(stats["errors"]))
+            else:
+                from app.services.legacy_import import cutover
+
+                stats["cutover_frozen_accounts"] = await cutover(db, product="flariane")
         if apply:
             await db.commit()
     stats["mode"] = "APPLIED" if apply else "DRY-RUN (nothing written; add --apply)"
@@ -110,6 +119,8 @@ def main() -> None:
     sub.add_parser("rotate-key")
     imp = sub.add_parser("import-flariane")
     imp.add_argument("--apply", action="store_true")
+    imp.add_argument("--refresh", action="store_true", help="also sync phone/password/name/blocking of already-migrated accounts (legacy authority only)")
+    imp.add_argument("--cutover", action="store_true", help="final refresh, then freeze: auth becomes the credential authority (needs --apply)")
     sub.add_parser("gen-keys")
     args = p.parse_args()
     if args.cmd == "create-admin":
@@ -117,7 +128,7 @@ def main() -> None:
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
     elif args.cmd == "import-flariane":
-        asyncio.run(import_flariane(args.apply))
+        asyncio.run(import_flariane(args.apply, args.refresh, args.cutover))
     else:
         print("AUTH_FIELD_ENCRYPTION_KEY=" + base64.b64encode(os.urandom(32)).decode())
         print("AUTH_HASH_KEY=" + base64.b64encode(os.urandom(32)).decode())

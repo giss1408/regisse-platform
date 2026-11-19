@@ -19,7 +19,7 @@ from app import messages, tokens
 from app.audit import audit
 from app.config import get_settings
 from app.errors import BadRequest, Conflict, Forbidden, NotFound, TooManyRequests, Unauthorized
-from app.models import CodeChallenge, Membership, RefreshToken, RelayRequest, User
+from app.models import CodeChallenge, LegacyIdentity, Membership, RefreshToken, RelayRequest, User
 from app.ratelimit import item, limiter
 from app.tokens import utcnow
 
@@ -167,6 +167,7 @@ async def relay_send(db: AsyncSession, req: RelayRequest, admin_id: uuid.UUID, i
         temp = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(10))
         user.password_hash = await to_thread.run_sync(hash_password, temp)
         user.must_change_password, user.temp_password_expires_at = True, now + timedelta(hours=s.temp_password_hours)
+        await claim_credentials(db, user.id)
         await revoke_all_sessions(db, user.id)
         text = messages.temp_password(req.product, user.display_name, temp)
         req.status = "done"
@@ -279,9 +280,10 @@ async def issue_pair(db: AsyncSession, user: User, product: str, app: str, role:
                         amr=",".join(amr), auth_time=auth_time, expires_at=now + timedelta(days=s.refresh_days)))
     phone = user_phone(user) or ""
     ttl = timedelta(minutes=s.access_token_minutes)
+    lid = await db.scalar(select(LegacyIdentity.legacy_id).where(LegacyIdentity.product == product, LegacyIdentity.user_id == user.id))
     access = await tokens.issue_access_token(
         db, sub=user.id, phone_key=kit_phone.phone_key(phone), product=product, app=app, role=role, roles=held, amr=amr,
-        auth_time=auth_time, sid=family, must_change_password=user.must_change_password, ttl=ttl,
+        auth_time=auth_time, sid=family, must_change_password=user.must_change_password, ttl=ttl, legacy_id=lid,
     )
     return {"access_token": access, "refresh_token": refresh, "token_type": "bearer", "expires_in": int(ttl.total_seconds()), "role": role,
             "must_change_password": user.must_change_password, "user_id": str(user.id)}
@@ -313,6 +315,11 @@ async def logout(db: AsyncSession, refresh_token: str) -> None:
         await db.execute(update(RefreshToken).where(RefreshToken.family == stored.family, RefreshToken.revoked_at.is_(None)).values(revoked_at=utcnow()))
 
 
+async def claim_credentials(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """auth now holds the newest credentials of this user: a later `import --refresh` must not overwrite them."""
+    await db.execute(update(LegacyIdentity).where(LegacyIdentity.user_id == user_id).values(credentials_authority="auth"))
+
+
 async def revoke_all_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
     await db.execute(update(RefreshToken).where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None)).values(revoked_at=utcnow()))
 
@@ -324,6 +331,7 @@ async def change_password(db: AsyncSession, user_id: uuid.UUID, current: str, ne
     check_password(new)
     user.password_hash = await to_thread.run_sync(hash_password, new)
     user.must_change_password, user.temp_password_expires_at = False, None
+    await claim_credentials(db, user.id)
     # end every other session; the current one keeps working until its access token expires
     await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != (keep_sid or "")).values(revoked_at=utcnow()))
     await audit(db, actor_type="user", actor_id=user.id, action="user.password_changed", entity="user", entity_id=user.id)

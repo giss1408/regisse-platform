@@ -70,7 +70,8 @@ def _private(key: SigningKey) -> Ed25519PrivateKey:
 
 
 async def issue_access_token(db: AsyncSession, *, sub: uuid.UUID, phone_key: str, product: str, app: str, role: str, roles: list[str],
-                             amr: list[str], auth_time: datetime, sid: str, must_change_password: bool, ttl: timedelta) -> str:
+                             amr: list[str], auth_time: datetime, sid: str, must_change_password: bool, ttl: timedelta,
+                             legacy_id: str | None = None) -> str:
     s = get_settings()
     key = await ensure_signing_key(db)
     now = utcnow()
@@ -84,6 +85,8 @@ async def issue_access_token(db: AsyncSession, *, sub: uuid.UUID, phone_key: str
     }
     if must_change_password:
         claims["mcp"] = True
+    if legacy_id:
+        claims["lid"] = legacy_id  # the user's id in THIS product's own table (migrated accounts), so the product need not match by phone
     return jwt.encode(claims, _private(key), algorithm=ALG, headers={"kid": key.kid})
 
 

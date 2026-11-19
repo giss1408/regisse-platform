@@ -49,6 +49,7 @@ class Principal:
     auth_time: int
     sid: str
     must_change_password: bool = False
+    legacy_id: str | None = None  # `lid`: the user's id in this product's own table (migrated accounts); prefer it over matching by phone
     claims: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def require_role(self, *roles: str) -> "Principal":
@@ -106,4 +107,4 @@ class SsoVerifier:
             raise SsoError("invalid_token")
         return Principal(sub=claims["sub"], phone_key=claims.get("ph", ""), role=role, roles=claims.get("roles", []), app=claims.get("app", ""),
                          amr=claims.get("amr", []), auth_time=int(claims.get("auth_time", 0)), sid=claims["sid"],
-                         must_change_password=bool(claims.get("mcp")), claims=claims)
+                         must_change_password=bool(claims.get("mcp")), legacy_id=claims.get("lid"), claims=claims)

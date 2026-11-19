@@ -176,3 +176,16 @@ Local data only: no production users exist, the real Render database has not bee
 
 ### Next options
 (a) fix risk 2 (`lid` claim) and risk 1 (credential authority switch) so the customer app can log in through auth; (b) map flariane admins (devices + TOTP) to auth staff roles; (c) auth security review; (d) fallback channels (SMS/email/WhatsApp API).
+
+## Step 3e: both migration risks fixed (2026-11-19)
+
+**Risk 2 (phone change splits a customer): fixed with the `lid` claim.** auth puts `lid` = the user's id in the token's product (from `legacy_identities`) into access tokens of migrated users; `regisse_kit.sso.Principal.legacy_id`; flariane (branch `platform/sso-dual-accept`) resolves by `lid` first, refuses unknown/malformed ids (never provisions), falls back to the phone only for tokens without `lid`.
+**Risk 1 (two password stores drift): fixed with refresh + authority + cutover.** `import-flariane --refresh --apply` pulls phone, password hash (+ forced change/temp password), name, blocking, late verification and ERASURE (flariane anonymisation erases the auth identity too) for accounts whose `credentials_authority` is "legacy". An account becomes "auth" when the user changes/resets her password in auth, or at `--cutover --apply` (final refresh, refuses to freeze if there are errors, idempotent). Refresh never touches an "auth" account, never re-enables a disabled one, never touches staff, and reports a phone already used by another auth account as an error instead of applying it. Migration 0003 (up/down/up verified).
+Verified: auth **50/50** unit tests... see below; kit **50/50**; flariane SSO smoke **20/20**; flariane full regression **175 passed**; live smoke `bash platform/tests/smoke_migrate_flariane.sh` **22/22** (migration, lid claim, number change keeps one customer, refresh moves the number to auth, password change in flariane reaches auth, a password set in auth is never overwritten, cutover freezes and is idempotent).
+(auth unit tests: 45 passed before the migration 0003 test run counted; rerun `cd platform/auth && make test` after any change.)
+
+### Cutover runbook for flariane customers (when the customer app switches to auth login)
+1. Backups: `infra/scripts/backup.sh` + dump of the flariane database. 2. Dry run `import-flariane` (+ `--refresh`), read counts/errors. 3. `--apply`, then `--refresh --apply` again (idempotent, picks up changes). 4. Verify with the smoke on a known account. 5. Ship the customer app build that logs in/resets through auth (not built yet). 6. `--cutover --apply` at the moment the old login stops being used. After step 6 flariane's own password endpoints must be disabled (not done: flariane still has them).
+
+### Still open
+Customer app does not log in through auth yet (Flutter change in `flariane/customer_app`, on a branch); flariane admins not on SSO; number change/recovery as an auth flow; SMS/email/WhatsApp-API channels; auth security review; key backups to a vault; BCEAO/ARTCI; email provider.

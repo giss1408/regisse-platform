@@ -140,3 +140,6 @@ class LegacyIdentity(Base):
     legacy_id: Mapped[str] = mapped_column(String(64))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    # Who owns this user's credentials/phone: "legacy" (the product's table, synced by `import --refresh`) or "auth"
+    # (set when the user changes her password in auth, or at cutover). Refresh never overwrites an "auth" account.
+    credentials_authority: Mapped[str] = mapped_column(String(8), default="legacy", server_default="legacy")
