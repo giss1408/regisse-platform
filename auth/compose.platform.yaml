@@ -1,0 +1,26 @@
+# auth service on the shared platform: Postgres/Redis/Caddy come from platform/infra.
+name: auth
+
+services:
+  web:
+    build:
+      context: .
+      additional_contexts:
+        kit: ../kit
+    image: auth-backend:local
+    container_name: auth-web
+    env_file: .env.platform
+    restart: unless-stopped
+    networks: [infra_net]
+    mem_limit: 384m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8000/healthz', headers={'Host': os.environ['PUBLIC_HOST'], 'X-Forwarded-Proto': 'https'}), timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+networks:
+  infra_net:
+    external: true
