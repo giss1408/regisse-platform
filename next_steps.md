@@ -13,8 +13,8 @@ The other apps are not finished: do NOT migrate or add tests for them until the 
 | 1. Local infra stack (`platform/infra`) | DONE | `make smoke` 27/27 |
 | 2. Product template (`platform/template`) validated by a pilot | DONE (SuiviProjet, out of scope now) | `tests/pilot_suivi.sh` 9/9 |
 | 2b. flariane onto the platform (Dockerfile, compose.platform.yaml, db_flariane, Caddy route, Celery worker) | DONE | web + worker healthy behind Caddy at `flariane-api.localhost:8080` |
-| 2c. flariane regression: pytest on Postgres 17 + e2e through Caddy | MOSTLY DONE | pytest: **155 passed** (PG17). e2e (`tests/e2e_flariane.sh`): **99/101**; the 2 failures are unset app settings on the fresh DB (see below), not code |
-| 3. `regisse_kit` v0.1, extracted from flariane only | TODO | |
+| 2c. flariane regression: pytest on Postgres 17 + e2e through Caddy | DONE | pytest **155 passed** with the kit (PG17); e2e `tests/e2e_flariane.sh` **101/101** with the kit |
+| 3. `regisse_kit` v0.1, extracted from flariane only | DONE | `platform/kit`: 38 tests (incl. flariane parity vectors); adopted in flariane via thin wrappers; flariane pytest 155/155 and e2e 101/101 after adoption |
 | 3b. `auth` service (flariane wa.me pattern, JWKS, memberships); flariane is the only consumer, then its e2e again | TODO | |
 | 4-5. Other products | PARKED (not finished by owner) | |
 | 6. Final e2e (flariane through infra + auth) | TODO | |
@@ -114,3 +114,14 @@ Open: merchant TOTP step-up for wallet changes (confirm), fidelia phone keys via
 No authenticator app for merchants. Merchant requests the wallet in Fidelia Pro (password re-entry) -> request waits in the admin queue -> an admin/super admin sends the WhatsApp confirmation code (wa.me, like login) to the merchant's login number -> merchant enters the code -> 24 h delay, then the new wallet activates. "This wasn't me" button freezes the change and locks the account for admin review. Admin fast path: the admin may call the merchant and activate immediately (call note mandatory, audited, alert on unusual volume, super admin can revert). All changes visible in the admin app. First-week payout cap on a new wallet applies even after immediate activation. First wallet = same process without the 24 h delay (my call). SSO assigns a UUID per account in the background; fidelia keeps phone keys via `ph` claim for now.
 Numbers (owner): first-week payout cap 50,000 FCFA on a new wallet; alert when one admin does 3 fast-path activations in a day. Reading to confirm: the cap is the total paid to the new wallet in its first 7 days, enforced by fidelia payout logic.
 Still open: BCEAO/ARTCI check, email provider for fallback.
+
+## Session result (2026-11-19, after "continue with the e2e settings and regisse_kit")
+
+- e2e settings: `flariane/backend/e2e/run_e2e.py` now fills ONLY empty settings (support WhatsApp, Wave) with placeholders via `PUT /admin/settings` before the public-info checks; it never overwrites admin-entered values and refuses production hosts. `tests/e2e_flariane.sh` also clears only flariane's rate-limit keys (`LIMITS*`) in Redis before each run, because repeated runs from one IP trip the real sign-up and password-reset limits.
+- `FLR_REGISTER_PER_IP_HOUR=1000` / `FLR_REGISTER_GLOBAL_HOUR=1000` are set in the LOCAL `flariane/.env.platform` only. Production must keep the defaults.
+- Kit adopted in flariane (uncommitted in the flariane repo): `app/security/crypto.py` (wrapper, keeps `_key`), `integrations/whatsapp.py` (verify_signature), `config.py` (database URL validator), `services/customer_auth.py` (phone normalisation, password strength). `backend/Dockerfile` installs the kit from build context `kit` (compose `additional_contexts: kit: ../platform/kit`). Replace by a pinned git tag once the kit has a remote.
+- Kit bug fixed vs flariane's original: `to_asyncpg_url` no longer mangles `sqlite:///` URLs.
+- Verified: kit 38/38; flariane pytest 155/155 (PG17, kit installed); flariane e2e 101/101 through Caddy; infra smoke 27/27 earlier (not rerun after the kit work).
+
+## Next (not started)
+Step 3b `auth` service: sources = fidelia `core/otp.py`, `api/auth.py`, `api/account.py`, `services/otp_sender.py` and flariane password/TOTP/wa.me code, via `regisse_kit`; then flariane becomes its first consumer (rerun the flariane e2e). Needed from the owner before/while building: BCEAO/ARTCI check (before Phase 7), email provider for the fallback channel. Owner actions for production unchanged (Hetzner, Cloudflare + Namecheap DNS move, R2 + age key, Meta WhatsApp Business).
