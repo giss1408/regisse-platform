@@ -98,3 +98,6 @@ Open, need the owner: 11 step-up factor for money actions (proposal: TOTP for ow
 
 ### Fidelia enrolment fields (owner, final)
 Agent creates the shop with: category, name, commune, address, opening hours, shop phone and the merchant's own phone (login; mandatory for agents). **No wallet at creation**: the merchant owner enters their own wallet in Fidelia Pro after activation (password + TOTP step-up). No wallet = listed + loyalty points, no pay QR. Phase 7 work in fidelia: `admin_create_venue` must reject payout fields for the `agent` role; admin app form drops the wallet fields. (The earlier "unconfirmed wallet" idea is superseded.)
+
+### Fidelia customers and fallbacks (owner, final)
+No SMS login: end customers also follow the flariane way (phone + password, one-time code relayed by a Fidelia member via wa.me, Business API later). **SMS and email are fallbacks for everyone** (number not on WhatsApp, relay queue over SLA, user request). New work: an `Email` OtpChannel (provider to choose); reuse fidelia's Orange/Africa's Talking sender class as the SMS fallback with its caps and budget. Decision 12 closed. Still open: 11 (TOTP step-up for owners/agents/admins), 9 (phone keys via `ph` claim), 10 (BCEAO/ARTCI check), plus the relay daily cap review at 200/day.
