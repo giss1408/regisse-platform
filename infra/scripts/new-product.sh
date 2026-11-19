@@ -56,6 +56,10 @@ ${SITE_SCHEME:-}${name}-api.${DOMAIN} {
 		health_uri /healthz
 		health_interval 5s
 		health_passes 1
+		health_headers {
+			Host ${name}-api.${DOMAIN}
+			X-Forwarded-Proto https
+		}
 	}
 }
 CADDY

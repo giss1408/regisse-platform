@@ -1,0 +1,25 @@
+# Product compose template. Copy to the product repo as compose.platform.yaml and replace __NAME__ / __PORT__.
+# The product NEVER runs its own postgres/redis and never publishes ports: Caddy (infra) reaches it by service name on infra_net.
+name: __NAME__
+
+services:
+  web:
+    build: .
+    image: __NAME__-web:local
+    container_name: __NAME__-web          # must match the upstream given to new-product.sh (default __NAME__-web:8000)
+    env_file: .env.platform               # copy of platform/infra/secrets/__NAME__.env + product settings
+    restart: unless-stopped
+    networks: [infra_net]
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      # Same request Caddy sends: public Host header + X-Forwarded-Proto (Django's ALLOWED_HOSTS / SSL redirect would reject 127.0.0.1)
+      test: ["CMD", "python", "-c", "import os,urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:__PORT__/healthz', headers={'Host': os.environ['PUBLIC_HOST'], 'X-Forwarded-Proto': 'https'}), timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+networks:
+  infra_net:
+    external: true

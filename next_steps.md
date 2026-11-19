@@ -3,18 +3,22 @@
 Plan: `../docs/platform/MIGRATION_PLAN.md` · Inventory: `../docs/platform/INVENTORY.md` · Skill: `~/.claude/skills/regisse-platform`
 Rule from owner: **no app has production users now** (2026-11-19), so cutovers need no rehearsal windows; still keep each step small, smoke-tested, e2e at the end. Update this file after every step.
 
+## SCOPE CHANGE (owner, 2026-11-19): tests and migration concentrate on **flariane only**
+The other apps are not finished: do NOT migrate or add tests for them until the owner says so. SuiviProjet was used once to validate the product template (pilot smoke 9/9 passed, left in place, container stopped); it is no longer in the test scope. SSO "all products" stays the target design, but the `auth` service is built and proven with flariane as the first and only consumer.
+
 ## Status
 
 | Step | State | Evidence |
 |---|---|---|
-| 1. Local infra stack (`platform/infra`: caddy, postgis17, redis, new-product, backup, restore-test, smoke) | DONE locally | `make smoke` -> 27 passed, 0 failed (2026-11-19) |
-| 1b. Hetzner server + Cloudflare + R2 (needs owner accounts/keys) | TODO (owner) | see "Owner actions" |
-| 2. Product template + pilot SuiviProjet | NEXT | |
-| 3. `regisse_kit` v0.1 | TODO | |
-| 3b. `auth` service (flariane wa.me pattern, JWKS, memberships) | TODO | |
-| 4. Django products | TODO | order: agriTechCMS?, supermarket-app, mainsUtiles, immoIzi-BE, tourismBE |
-| 5. FastAPI products | TODO | docuciv, voya, flariane |
-| 6. Final e2e across all products + cleanup | TODO | |
+| 1. Local infra stack (`platform/infra`) | DONE | `make smoke` 27/27 |
+| 2. Product template (`platform/template`) validated by a pilot | DONE (SuiviProjet, out of scope now) | `tests/pilot_suivi.sh` 9/9 |
+| 2b. flariane onto the platform (Dockerfile, compose.platform.yaml, db_flariane, Caddy route, Celery worker) | IN PROGRESS | |
+| 2c. flariane regression: existing pytest suite on Postgres 17 + e2e (`backend/e2e/run_e2e.py`) through Caddy | TODO | |
+| 3. `regisse_kit` v0.1, extracted from flariane only | TODO | |
+| 3b. `auth` service (flariane wa.me pattern, JWKS, memberships); flariane is the only consumer, then its e2e again | TODO | |
+| 4-5. Other products | PARKED (not finished by owner) | |
+| 6. Final e2e (flariane through infra + auth) | TODO | |
+| 1b. Hetzner + Cloudflare + R2 | TODO (owner accounts) | |
 
 ## How to run what exists
 
