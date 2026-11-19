@@ -332,3 +332,61 @@ async def change_password(db: AsyncSession, user_id: uuid.UUID, current: str, ne
 async def session_active(db: AsyncSession, sid: str) -> bool:
     row = await db.scalar(select(RefreshToken).where(RefreshToken.family == sid, RefreshToken.revoked_at.is_(None)).limit(1))
     return row is not None
+
+
+# --- staff accounts (created in person by a super admin; never through the relay) -------------------
+
+
+def _temp_password(n: int = 12) -> str:
+    return "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(n))
+
+
+async def create_staff(db: AsyncSession, *, raw_phone: str, display_name: str, product: str, role: str, admin_id: uuid.UUID, ip: str | None) -> dict:
+    """Creates an ACTIVE staff account with a one-time temporary password (and an authenticator secret for roles that need one).
+    Both are returned once to the super admin, who hands them over in person: they never travel by WhatsApp."""
+    cfg = product_config(product)
+    known = {r for roles in cfg["apps"].values() for r in roles}
+    if role not in known or role not in PRIVILEGED_ROLES:
+        raise BadRequest("not_a_staff_role")
+    phone = normalize_phone(raw_phone)
+    if await user_by_phone(db, phone) is not None:
+        raise Conflict("phone_taken")
+    now = utcnow()
+    temp = _temp_password()
+    secret = pyotp.random_base32() if role in cfg.get("totp_roles", []) else None
+    user = User(phone_enc=cipher().encrypt(phone), phone_hash=hasher().phone(phone), display_name=display_name.strip()[:80],
+                password_hash=await to_thread.run_sync(hash_password, temp), status="active", must_change_password=True,
+                temp_password_expires_at=now + timedelta(hours=72), totp_secret_enc=cipher().encrypt(secret) if secret else None)
+    user.memberships = [Membership(product=product, role=role, created_by=admin_id)]
+    db.add(user)
+    await db.flush()
+    await audit(db, actor_type="admin", actor_id=admin_id, action="staff.created", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "role": role})
+    return _staff_secrets(user, phone, temp, secret)
+
+
+def _staff_secrets(user: User, phone: str, temp: str, secret: str | None) -> dict:
+    out: dict = {"user_id": str(user.id), "temporary_password": temp, "temporary_password_valid_hours": 72, "totp": None}
+    if secret:
+        out["totp"] = {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=kit_phone.phone_key(phone), issuer_name="regisse auth")}
+    return out
+
+
+async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool, admin_id: uuid.UUID, ip: str | None) -> dict:
+    user = await db.get(User, user_id)
+    if user is None or user.phone_enc is None:
+        raise NotFound("user_not_found")
+    if admin_id == user.id:
+        raise Conflict("cannot_reset_self")
+    if not is_privileged(user):
+        raise BadRequest("not_a_staff_account")
+    now = utcnow()
+    temp = _temp_password()
+    user.password_hash = await to_thread.run_sync(hash_password, temp)
+    user.must_change_password, user.temp_password_expires_at = True, now + timedelta(hours=72)
+    secret = None
+    if reset_totp:
+        secret = pyotp.random_base32()
+        user.totp_secret_enc, user.totp_last_step = cipher().encrypt(secret), 0
+    await revoke_all_sessions(db, user.id)
+    await audit(db, actor_type="admin", actor_id=admin_id, action="staff.reset", entity="user", entity_id=user.id, ip=ip, detail={"totp_reset": reset_totp})
+    return _staff_secrets(user, user_phone(user) or "", temp, secret)

@@ -129,6 +129,19 @@ def main() -> int:
     check("admin disables the user", http.post(f"/v1/admin/users/{uid}/disable", headers=admin).status_code == 204)
     check("disabled user cannot log in", http.post("/v1/login", json={"phone": phone, "password": "Brand-New-Pass-1", "product": "flariane", "app": "customer"}).json().get("detail") == "account_blocked")
     check("admin re-enables", http.post(f"/v1/admin/users/{uid}/enable", headers=admin).status_code == 204)
+    section("F. Staff accounts (super admin creates them in person)")
+    staff_phone = f"07{random.randint(10000000, 99999999)}"
+    r = http.post("/v1/admin/staff", headers=admin, json={"phone": staff_phone, "display_name": "E2E Agent", "product": "fidelia", "role": "agent"})
+    check("super admin creates an agent (no authenticator for agents)", r.status_code == 201 and r.json()["totp"] is None and r.json()["temporary_password"], r.text)
+    staff = r.json()
+    r = http.post("/v1/login", json={"phone": staff_phone, "password": staff["temporary_password"], "product": "fidelia", "app": "agent"})
+    check("agent logs in with the temporary password and must change it", r.status_code == 200 and r.json()["must_change_password"] is True, r.text)
+    check("agent cannot call admin endpoints", http.get("/v1/admin/relay-queue", headers={"Authorization": f"Bearer {r.json()['access_token']}"}).status_code == 403)
+    check("admin deactivates the agent", http.post(f"/v1/admin/users/{staff['user_id']}/disable", headers=admin).status_code == 204)
+    check("deactivated agent is refused", http.post("/v1/login", json={"phone": staff_phone, "password": staff["temporary_password"], "product": "fidelia", "app": "agent"}).json().get("detail") == "account_blocked")
+    r = http.post("/v1/admin/staff", headers=admin, json={"phone": f"07{random.randint(10000000, 99999999)}", "display_name": "E2E Op", "product": "flariane", "role": "operator"})
+    check("staff creation returns an authenticator secret for operators", r.status_code == 201 and r.json()["totp"] and r.json()["totp"]["uri"].startswith("otpauth://"), r.text)
+
     # (admin-vs-super-admin permissions are covered by the unit tests: this e2e admin is a super admin)
 
     total, ok = len(results), sum(1 for _, k in results if k)

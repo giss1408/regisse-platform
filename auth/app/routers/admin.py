@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import audit, client_ip
 from app.config import get_settings
 from app.db import get_session
-from app.deps import Principal, current_admin
+from app.deps import Principal, current_admin, current_super_admin
 from app.errors import Conflict, Forbidden, NotFound
 from app.models import Membership, RelayRequest, User
 from app.services import accounts
@@ -154,3 +154,30 @@ async def revoke_membership(data: MembershipIn, request: Request, admin: Princip
     await audit(db, actor_type="admin", actor_id=admin.user_id, action="membership.revoked", entity="user", entity_id=data.user_id, ip=client_ip(request),
                 detail={"product": data.product, "role": data.role})
     await db.commit()
+
+
+class StaffIn(BaseModel):
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=32)]
+    display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+    product: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]{1,31}$")]
+    role: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z_]{1,31}$")]
+
+
+class StaffResetIn(BaseModel):
+    reset_totp: bool = False
+
+
+@router.post("/staff", status_code=201)
+async def create_staff(data: StaffIn, request: Request, admin: Principal = Depends(current_super_admin), db: AsyncSession = Depends(get_session)) -> dict:
+    """Super admin only. Returns the temporary password (and authenticator secret when the role needs one) ONCE, to hand over in person."""
+    out = await accounts.create_staff(db, raw_phone=data.phone, display_name=data.display_name, product=data.product, role=data.role,
+                                      admin_id=admin.user_id, ip=client_ip(request))
+    await db.commit()
+    return out
+
+
+@router.post("/staff/{user_id}/reset")
+async def reset_staff(user_id: uuid.UUID, data: StaffResetIn, request: Request, admin: Principal = Depends(current_super_admin), db: AsyncSession = Depends(get_session)) -> dict:
+    out = await accounts.reset_staff(db, user_id, reset_totp=data.reset_totp, admin_id=admin.user_id, ip=client_ip(request))
+    await db.commit()
+    return out
