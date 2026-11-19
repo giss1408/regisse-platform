@@ -314,3 +314,31 @@ async def test_health_and_headers(client):
     r = await client.get("/healthz")
     assert r.status_code == 200 and r.headers["x-content-type-options"] == "nosniff" and r.headers["cache-control"] == "no-store"
     assert (await client.get("/readyz")).json()["checks"] == {"db": "ok"}
+
+
+async def test_user_can_erase_her_identity_with_her_password(client):
+    admin = await admin_headers()
+    await register_and_activate(client, admin)
+    t = (await login(client)).json()
+    h = {"Authorization": f"Bearer {t['access_token']}"}
+    assert (await client.post("/v1/me/delete", headers=h, json={"current_password": "wrong-password-1"})).status_code == 401  # a stolen token is not enough
+    assert (await client.post("/v1/me/delete", headers=h, json={"current_password": "wrong-password-1", "check_only": True})).status_code == 401
+    assert (await client.post("/v1/me/delete", headers=h, json={"current_password": PASSWORD, "check_only": True})).status_code == 204
+    assert (await login(client)).status_code == 200  # check_only changed nothing
+    assert (await client.post("/v1/me/delete", headers=h, json={"current_password": PASSWORD})).status_code == 204
+    assert (await login(client)).status_code == 401
+    assert (await client.post("/v1/refresh", json={"refresh_token": t["refresh_token"]})).status_code == 401
+    assert (await client.get("/v1/me", headers=h)).status_code == 401
+    async with SessionLocal() as db:
+        from app.models import User
+        u = (await db.scalars(select(User).where(User.status == "disabled"))).one()  # the admin fixture is active
+    assert u.phone_enc is None and u.phone_hash is None and u.display_name is None and u.password_hash is None
+    # the number is free again
+    r = await client.post("/v1/register", json={"phone": "0701020304", "password": PASSWORD, "product": "flariane", "consent": True})
+    assert r.status_code == 201
+
+
+async def test_staff_cannot_erase_themselves(client):
+    from tests.conftest import admin_headers as ah
+    h = await ah("admin", "0700000077")
+    assert (await client.post("/v1/me/delete", headers=h, json={"current_password": PASSWORD})).json()["detail"] == "staff_cannot_self_delete"

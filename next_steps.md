@@ -188,3 +188,18 @@ Verified: auth unit/integration tests **45/45** (`cd platform/auth && make test`
 
 ### Still open
 Customer app does not log in through auth yet (Flutter change in `flariane/customer_app`, on a branch); flariane admins not on SSO; number change/recovery as an auth flow; SMS/email/WhatsApp-API channels; auth security review; key backups to a vault; BCEAO/ARTCI; email provider.
+
+## Step 3f: customer app signs in through auth (2026-11-19)
+
+Branch `platform/customer-app-auth-login` (flariane repo, from `platform/sso-dual-accept`; committed locally, not pushed). Build flag `--dart-define=AUTH_BASE_URL=<auth url>`: **empty (the default) keeps the legacy flariane login**, so the store build is unchanged until the cutover (then change the default to `https://auth-api.regisse.com`).
+**App in auth mode:** register -> new ActivationScreen (the team sends the 6-digit code on WhatsApp via the auth relay) -> login with what she typed; login/refresh/logout/password reset/password change go to auth, everything else to flariane with the same access token; temporary password -> forced change screen using auth (flariane refuses `mcp` tokens, so no flariane call happens before it); delete account = password check in auth (`check_only`) -> flariane anonymise -> auth erase; phone change not available (message: write to the team); referral code typed at sign-up is applied after first login through the new `POST /me/referral`.
+**Server additions:** auth `POST /v1/me/delete` (+ `check_only`), flariane `POST /me/referral` (once, before the first order; credits the signup point at once).
+**Bug found and fixed:** the app's 401 retry ran through the same queued interceptors and deadlocked when the retried call failed again (e.g. a blocked customer holding a valid auth token): now retried on a plain client, and a still-refused fresh token signs her out. Regression test fails without the fix (checked).
+Verified: Flutter analyze clean, **63 app tests + 22 new = all pass** (unit tests with fake servers, `flutter test`); live smoke with the REAL app client against the running stack `bash platform/tests/smoke_customer_app_auth.sh` **4/4** (login/refresh/logout; same error for wrong password and unknown number; temporary password -> forced change; sign-up + relay + activation + referral point credited to the referrer + delete in the right order); auth tests **47/47**; flariane backend regression **178 passed**; no on-device or store build run (not done here).
+
+### Before the store release with auth
+1. UI not tried on a device/emulator by me; run the app against local (`AUTH_BASE_URL=http://10.0.2.2:8080`, flariane `API_BASE_URL=http://10.0.2.2:8080`, hosts need the `Host` routing: use real hostnames or an adb reverse) and click through sign-up, forced change, forgot password, delete.
+2. Certificate pinning: `pinned_roots.dart` covers the CA of flariane's host; `auth-api.regisse.com` (Cloudflare) must be covered too, check before shipping.
+3. Production wiring: `auth` deployed with its own domain, `FLR_SSO_*` set on flariane, migrated customers (`import-flariane`, then `--cutover` when the app ships), flariane's own password endpoints disabled after the cutover.
+4. Customers who already have the store app (legacy login) keep working until they update: flariane still accepts its own tokens. Plan the order: ship auth + import, then app release, then cutover freeze.
+5. Number change and account recovery in auth (the app hides phone change in auth mode).

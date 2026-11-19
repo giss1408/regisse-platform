@@ -398,3 +398,21 @@ async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool,
     await revoke_all_sessions(db, user.id)
     await audit(db, actor_type="admin", actor_id=admin_id, action="staff.reset", entity="user", entity_id=user.id, ip=ip, detail={"totp_reset": reset_totp})
     return _staff_secrets(user, user_phone(user) or "", temp, secret)
+
+
+async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str, ip: str | None, *, check_only: bool = False) -> None:
+    """Account deletion by the user. The product has already removed or anonymised its own data. Staff accounts cannot erase
+    themselves (a super admin does that); the password is required so a stolen access token alone cannot delete an account."""
+    user = await db.get(User, user_id)
+    if user is None or user.status != "active" or not user.password_hash:
+        raise Unauthorized("invalid_credentials")
+    if is_privileged(user):
+        raise Forbidden("staff_cannot_self_delete")
+    if not await to_thread.run_sync(verify_password, user.password_hash, current_password):
+        raise Unauthorized("invalid_credentials")
+    if check_only:
+        return
+    user.phone_enc = user.phone_hash = user.display_name = user.password_hash = user.totp_secret_enc = None
+    user.status = "disabled"
+    await revoke_all_sessions(db, user.id)
+    await audit(db, actor_type="user", actor_id=user.id, action="user.erased", entity="user", entity_id=user.id, ip=ip)

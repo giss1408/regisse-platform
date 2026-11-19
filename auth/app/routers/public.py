@@ -60,6 +60,11 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class DeleteMeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    check_only: bool = False  # verify the password and the right to delete, change nothing (lets the app check before it deletes elsewhere)
+
+
 class IntrospectIn(BaseModel):
     token: str = Field(min_length=20, max_length=4096)
 
@@ -110,6 +115,13 @@ async def reset_request(data: ResetRequestIn, request: Request, db: AsyncSession
 @router.post("/password/change", status_code=204)
 async def change_password(data: ChangePasswordIn, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> None:
     await accounts.change_password(db, p.user_id, data.current_password, data.new_password, p.sid)
+    await db.commit()
+
+
+@router.post("/me/delete", status_code=204)
+async def delete_me(data: DeleteMeIn, request: Request, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> None:
+    """Erase my identity in auth (the product deletes its own data first: auth is the last step). Password required."""
+    await accounts.erase_self(db, p.user_id, data.current_password, client_ip(request), check_only=data.check_only)
     await db.commit()
 
 
