@@ -101,3 +101,7 @@ Agent creates the shop with: category, name, commune, address, opening hours, sh
 
 ### Fidelia customers and fallbacks (owner, final)
 No SMS login: end customers also follow the flariane way (phone + password, one-time code relayed by a Fidelia member via wa.me, Business API later). **SMS and email are fallbacks for everyone** (number not on WhatsApp, relay queue over SLA, user request). New work: an `Email` OtpChannel (provider to choose); reuse fidelia's Orange/Africa's Talking sender class as the SMS fallback with its caps and budget. Decision 12 closed. Still open: 11 (TOTP step-up for owners/agents/admins), 9 (phone keys via `ph` claim), 10 (BCEAO/ARTCI check), plus the relay daily cap review at 200/day.
+
+### Fidelia roles (owner answers)
+Admin and super admin use an authenticator code (TOTP); agents are created by the super admin. "Owner" was loose wording for the **`merchant` role** (shop owner/manager). Role table is in plan 6e: super_admin (new, created in person, 2+ recommended), admin, agent (super-admin-created, TOTP at login proposed because agents relay codes), merchant (TOTP only as step-up for wallet/payout settings), cashier (added by merchant, no TOTP), customer.
+Open: (a) TOTP at login for agents (proposal yes), (b) fidelia phone keys via `ph` claim, (c) BCEAO/ARTCI check.
