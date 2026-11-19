@@ -78,3 +78,16 @@ bash platform/tests/e2e_flariane.sh                  # flariane e2e through Cadd
 # flariane pytest on PG17: see flariane/backend/tests, needs a postgres on localhost:5433 (flariane/flariane);
 # run used: docker run -d --name flr-testdb ... postgres:17-alpine -c port=5433, pytest in python:3.12-slim with --network container:flr-testdb
 ```
+
+## Fidelia and SSO (owner decision 2026-11-19, read-only analysis done)
+
+Plan section 6d records it. Nothing in fidelia was changed (only read: `api/auth.py`, `api/account.py`, `core/security.py`, `core/otp.py`, `services/otp_sender.py`, `api/staff.py`, `models.py`).
+
+Key facts: fidelia logs in with **phone + SMS code on every sign-in** (Orange / Africa's Talking, budget + caps), JWT HS256 with one secret `FIDELIA_SECRET_KEY`, `sub` = `tel:+225...`, rotating refresh with theft detection, roles per app session, data keyed by phone key (~65 + ~40 call sites). Findings to fix, not copy: single shared secret, role-less token defaults to merchant, 60 min access TTL with no revocation check.
+
+Consequences already written in the plan: `auth` is extracted mainly from **fidelia's** auth code (plus flariane's password/TOTP/wa.me), tokens carry `sub` UUID + `ph` phone key + `auth_time`/`amr`, money routes need step-up and revocation check, Phase 7 (fidelia joins last, behind flags, staff -> merchants -> customers).
+
+**Owner decisions still open** (plan section 10, items 8-10):
+8. Login model in the one user pool: SMS-code (fidelia) vs password (flariane); my lean = support both per user.
+9. Keep fidelia's phone keys via the `ph` claim for now, UUID migration later (lean: yes).
+10. BCEAO / ARTCI compliance check before Phase 7.
