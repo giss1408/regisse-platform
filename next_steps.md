@@ -143,3 +143,20 @@ Deployed locally: product `auth` on infra (db_auth, redis db 4), `auth-api.local
 7. No wallet-change confirmation purpose yet (fidelia Phase 7: generic "confirmation code" request purpose in the relay).
 8. Production hardening not done: Redis-backed limits are wired but untested at scale; signing-key rotation schedule/runbook; backups of `db_auth` are covered by the infra backup script but the encryption key backup (AUTH_FIELD_ENCRYPTION_KEY, AUTH_HASH_KEY) must be stored in a vault, losing them makes users unreadable.
 9. Security review of `auth` (planned gate before real users and before Phase 7) not done; mutation-style sanity checks of the security tests not done.
+
+## Step 3c: staff endpoint + flariane SSO dual-accept (2026-11-19, owner: branches in flariane/fidelia, smoke tests only for flariane)
+
+**Branch rule (owner):** new implementation in flariane and fidelia always goes on a branch. flariane now: `platform/shared-infra-kit` (Docker, compose, kit adoption; commit 0ee07ea) and `platform/sso-dual-accept` (branched from it, committed locally, NOT pushed or merged). fidelia repos: untouched so far (fidelia-BE is on `infra/docker-cloudflare-hardening`, fidelia-docs has 5 uncommitted changes that are not mine).
+
+**auth:** `POST /v1/admin/staff` (super admin only; returns temporary password once, authenticator secret only for TOTP roles; agents have none) and `POST /v1/admin/staff/{id}/reset`. Tests 29/29; e2e 38/38 (section F covers staff). Admins and super admins can deactivate agents (existing disable endpoint).
+
+**flariane dual-accept (customers only):** flag `FLR_SSO_ENABLED` (default false), `FLR_SSO_ISSUER`, `FLR_SSO_JWKS_URL`, `FLR_SSO_AUDIENCE=flariane`. `app/security/sso.py` + hook in `security/deps.py:current_customer`. Customer matched by `ph` claim -> `phone_hash`; unknown phone gets a Customer on first use (phone_verified_at now, consent_version `sso-2026-11`, referral code). Admin routes and flariane's own login/refresh unchanged.
+Verified (smoke, no e2e as requested): 17 new tests in `backend/tests/test_sso_dual_accept.py` (local Ed25519 key + JWKS; includes forged HS256/none/other-key, wrong aud/iss/exp, admin app/role, mcp, blocked customer, auth outage = 401); mutation check on a copy (guard removed) made exactly the 3 relevant tests fail; flariane full pytest **172 passed** (155 + 17); live smoke through Caddy `bash platform/tests/smoke_flariane_sso.sh` **5/5** (customer created in auth, relay-activated, calls flariane `/me` with the auth token; admin route, forged token and anonymous refused).
+Found and fixed on the way: in `compose.platform.yaml` Celery beat could not write `celerybeat-schedule` as the non-root user and crashed silently, so flariane's scheduled tasks (expire quotes, cancel unpaid orders) were NOT running in the platform stack; schedule file now in `/tmp` (beat starts, worker healthy). Worth checking whether the same happened on Render (`render.production.yaml` runs the worker with `-B` as well).
+
+### Not done / next
+1. Flariane **admins** are not on SSO (device approval + TOTP model); decide mapping to `super_admin/operator/viewer` memberships.
+2. **Migration of existing flariane customers into `db_auth`** (legacy mapping, password hashes are argon2id and importable) is not done: today an SSO user and a native flariane user with the same phone map to the same Customer row, but their passwords are separate (auth password vs flariane password).
+3. Flariane's own login/register endpoints are still the primary path; switching the customer app to `auth` (and retiring flariane's customer refresh tokens) is a later, separate change.
+4. Still open from before: BCEAO/ARTCI check, email fallback provider, SMS/email/WhatsApp-API channels, security review of `auth`, key backups to a vault.
+5. fidelia: nothing built (Phase 7 gated).
