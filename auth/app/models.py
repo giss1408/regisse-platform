@@ -127,3 +127,16 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(64))
     ip: Mapped[str | None] = mapped_column(String(64))
     detail: Mapped[dict | None] = mapped_column(JSON)
+
+
+class LegacyIdentity(Base):
+    """Maps an id in a product's own user table to the global user, for migrated accounts (kept so a product can find its
+    rows by the old id, and so a sold product can be extracted)."""
+
+    __tablename__ = "legacy_identities"
+    __table_args__ = (UniqueConstraint("product", "legacy_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product: Mapped[str] = mapped_column(String(32))
+    legacy_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

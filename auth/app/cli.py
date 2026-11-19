@@ -2,6 +2,7 @@
 
     AUTH_ADMIN_PASSWORD=... python -m app.cli create-admin --phone 0701020304 --name "Régis" --role super_admin
     python -m app.cli rotate-key
+    FLARIANE_DATABASE_URL=... FLARIANE_FIELD_ENCRYPTION_KEY=... python -m app.cli import-flariane [--apply]
     python -m app.cli gen-keys
 """
 
@@ -48,6 +49,57 @@ async def rotate() -> None:
     print(f"new signing key {key.kid}; the previous key stays in the JWKS until its tokens expire")
 
 
+def _naive_utc(dt):  # flariane stores timezone-aware timestamps; auth stores naive UTC
+    from datetime import timezone
+
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt is not None else None
+
+
+async def import_flariane(apply: bool) -> None:
+    """Dry-run by default. Reads flariane's `customers` table READ-ONLY with FLARIANE_DATABASE_URL and decrypts phones in memory
+    with FLARIANE_FIELD_ENCRYPTION_KEY (neither is stored in auth)."""
+    import json
+
+    from regisse_kit.crypto import FieldCipher
+    from regisse_kit.db_url import to_asyncpg_url
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.services.legacy_import import import_rows
+
+    src_url, key = os.environ.get("FLARIANE_DATABASE_URL"), os.environ.get("FLARIANE_FIELD_ENCRYPTION_KEY")
+    if not src_url or not key:
+        raise SystemExit("set FLARIANE_DATABASE_URL and FLARIANE_FIELD_ENCRYPTION_KEY")
+    flr_cipher = FieldCipher(key)
+    engine = create_async_engine(to_asyncpg_url(src_url))
+    rows: list[dict] = []
+    async with engine.connect() as conn:
+        await conn.execute(text("SET TRANSACTION READ ONLY"))
+        result = await conn.execute(text(
+            "select id, display_name, phone_enc, password_hash, must_change_password, temp_password_expires_at, phone_verified_at, consent_at, "
+            "consent_version, blocked_at, anonymised_at, password_reset_requested_at, created_at from customers order by id"))
+        for r in result.mappings():
+            phone = None
+            if r["phone_enc"] is not None and r["anonymised_at"] is None:
+                try:
+                    phone = flr_cipher.decrypt(r["phone_enc"])
+                except Exception:  # wrong key or corrupt row: reported by the importer as an invalid phone, never printed
+                    phone = "decrypt-failed"
+            status = "disabled" if r["blocked_at"] else ("pending" if r["phone_verified_at"] is None else "active")
+            rows.append({"id": r["id"], "phone": phone, "display_name": r["display_name"], "password_hash": r["password_hash"], "status": status,
+                         "must_change_password": r["must_change_password"], "temp_password_expires_at": _naive_utc(r["temp_password_expires_at"]),
+                         "phone_verified_at": _naive_utc(r["phone_verified_at"]), "consent_at": _naive_utc(r["consent_at"]),
+                         "consent_version": r["consent_version"], "created_at": _naive_utc(r["created_at"]),
+                         "reset_requested": r["password_reset_requested_at"] is not None})
+    await engine.dispose()
+    async with SessionLocal() as db:
+        stats = await import_rows(db, rows, product="flariane", role="customer", apply=apply)
+        if apply:
+            await db.commit()
+    stats["mode"] = "APPLIED" if apply else "DRY-RUN (nothing written; add --apply)"
+    print(json.dumps(stats, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -56,12 +108,16 @@ def main() -> None:
     a.add_argument("--name", required=True)
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
+    imp = sub.add_parser("import-flariane")
+    imp.add_argument("--apply", action="store_true")
     sub.add_parser("gen-keys")
     args = p.parse_args()
     if args.cmd == "create-admin":
         asyncio.run(create_admin(args.phone, args.name, args.role))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
+    elif args.cmd == "import-flariane":
+        asyncio.run(import_flariane(args.apply))
     else:
         print("AUTH_FIELD_ENCRYPTION_KEY=" + base64.b64encode(os.urandom(32)).decode())
         print("AUTH_HASH_KEY=" + base64.b64encode(os.urandom(32)).decode())
