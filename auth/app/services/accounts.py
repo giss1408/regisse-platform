@@ -13,6 +13,7 @@ from regisse_kit import passwords as kit_passwords
 from regisse_kit import phone as kit_phone
 from regisse_kit.crypto import FieldCipher, KeyedHasher, hash_password, needs_rehash, random_token, token_hash, verify_password
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import messages, tokens
@@ -47,6 +48,25 @@ def cipher() -> FieldCipher:
     return _cipher(get_settings().field_encryption_key)
 
 
+def ip_limit(spec: str, scope: str, ip: str | None) -> None:
+    """Loose per-IP limit (carriers share IPs, so it stops one machine hammering many accounts, not a single account)."""
+    if not limiter().hit(item(spec), f"{scope}-ip:{ip}"):
+        raise TooManyRequests("rate_limited")
+
+
+_NAME_STRIP = re.compile(r"[\x00-\x1f\x7f*_`~<>\\]")
+
+
+def clean_name(raw: str | None) -> str | None:
+    """Display names end up inside WhatsApp messages an admin sends: no control characters, no formatting characters."""
+    name = _NAME_STRIP.sub("", raw or "").strip()[:80]
+    return name or None
+
+
+_COMMON_PASSWORDS = {"password", "password1", "password123", "motdepasse", "motdepasse1", "azerty123", "azertyuiop", "qwertyuiop", "qwerty123",
+                     "12345678", "123456789", "1234567890", "abcd1234", "iloveyou", "letmein1", "welcome1", "flariane", "fidelia1", "00000000", "11111111"}
+
+
 def normalize_phone(raw: str) -> str:
     try:
         return kit_phone.normalize_ci_phone(raw, allow_test_numbers=get_settings().test_numbers_ok)
@@ -54,11 +74,15 @@ def normalize_phone(raw: str) -> str:
         raise BadRequest("invalid_phone", "Numéro ivoirien à 10 chiffres attendu") from None
 
 
-def check_password(password: str) -> None:
+def check_password(password: str, phone: str | None = None) -> None:
     try:
         kit_passwords.check_password_strength(password)
     except kit_passwords.WeakPassword as exc:
         raise BadRequest("weak_password", str(exc)) from None
+    if password.lower() in _COMMON_PASSWORDS:
+        raise BadRequest("weak_password", "Mot de passe trop courant")
+    if phone and re.sub(r"\D", "", password) in (re.sub(r"\D", "", phone), re.sub(r"\D", "", phone)[-10:]):
+        raise BadRequest("weak_password", "Ne pas utiliser ton numéro de téléphone")
 
 
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,200}\.[^@\s.]{2,}$")
@@ -71,12 +95,14 @@ def normalize_email(raw: str) -> str:
     return e
 
 
-async def user_by_email(db: AsyncSession, email: str) -> User | None:
-    return await db.scalar(select(User).where(User.email_hash == hasher().hash(email, "email")))
+async def user_by_email(db: AsyncSession, email: str, *, lock: bool = False) -> User | None:
+    q = select(User).where(User.email_hash == hasher().hash(email, "email"))
+    return await db.scalar(q.with_for_update() if lock else q)
 
 
-async def user_by_phone(db: AsyncSession, e164: str) -> User | None:
-    return await db.scalar(select(User).where(User.phone_hash == hasher().phone(e164)))
+async def user_by_phone(db: AsyncSession, e164: str, *, lock: bool = False) -> User | None:
+    q = select(User).where(User.phone_hash == hasher().phone(e164))
+    return await db.scalar(q.with_for_update() if lock else q)
 
 
 def user_phone(user: User) -> str | None:
@@ -108,15 +134,19 @@ async def register(db: AsyncSession, *, raw_phone: str, password: str, display_n
     if not limiter().hit(item(f"{s.register_per_ip_hour}/hour"), f"register-ip:{ip}"):
         raise TooManyRequests("rate_limited")
     phone = normalize_phone(raw_phone)
-    check_password(password)
+    check_password(password, phone)
     if await user_by_phone(db, phone) is not None:
         raise Conflict("phone_taken")
     pw_hash = await to_thread.run_sync(hash_password, password)  # argon2 is CPU-bound
-    user = User(phone_enc=cipher().encrypt(phone), phone_hash=hasher().phone(phone), display_name=(display_name or None) and display_name.strip()[:80],
+    user = User(phone_enc=cipher().encrypt(phone), phone_hash=hasher().phone(phone), display_name=clean_name(display_name),
                 password_hash=pw_hash, status="pending_activation", consent_at=utcnow(), consent_version=CONSENT_VERSION)
     user.memberships = [Membership(product=product, role=reg["role"])]
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:  # two sign-ups with the same number at once: the unique index decides, the loser gets a clean answer
+        await db.rollback()
+        raise Conflict("phone_taken") from None
     db.add(RelayRequest(user_id=user.id, product=product, purpose="activation"))
     await audit(db, actor_type="user", actor_id=user.id, action="user.registered", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
     return user
@@ -126,11 +156,10 @@ async def activate(db: AsyncSession, *, raw_phone: str, code: str) -> User:
     user = await user_by_phone(db, normalize_phone(raw_phone))
     if user is None or user.status == "rejected":
         raise BadRequest("wrong_activation_code")
-    if user.status == "active":
-        return user
     if user.status != "pending_activation":
-        raise Forbidden("account_blocked")
-    ch = await db.scalar(select(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "activation"))
+        # Active, disabled: answer exactly like an unknown number, so this endpoint cannot be used to learn who has an account.
+        raise BadRequest("wrong_activation_code")
+    ch = await db.scalar(select(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "activation").with_for_update())
     now = utcnow()
     kit_ch = kit_codes.CodeChallenge(code_hash=ch.code_hash, expires_at=ch.expires_at, attempts=ch.attempts) if ch else None
     try:
@@ -213,8 +242,8 @@ async def request_password_reset(db: AsyncSession, *, raw_phone: str, product: s
     if not limiter().hit(item(s.reset_request_limit), f"reset-phone:{ph}") or not limiter().hit(item("30/hour"), f"reset-ip:{ip}"):
         raise TooManyRequests("reset_rate_limited")
     user = await user_by_phone(db, phone)
-    if user is None or user.status != "active" or is_privileged(user):
-        return
+    if user is None or user.status != "active" or is_privileged(user) or not _roles_for(user, product):
+        return  # unknown, blocked, staff, or not a user of that product: the same silent answer
     open_req = await db.scalar(select(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "password_reset", RelayRequest.status == "open"))
     if open_req is None:
         db.add(RelayRequest(user_id=user.id, product=product, purpose="password_reset"))
@@ -245,19 +274,20 @@ async def login(db: AsyncSession, *, raw_phone: str | None = None, raw_email: st
     cfg = product_config(product)
     if bool(raw_phone) == bool(raw_email):
         raise BadRequest("phone_or_email")
+    ip_limit(s.login_ip_limit, "login", ip)
     if raw_email:
         email = normalize_email(raw_email)
         key_id, user = hasher().hash(email, "email"), None
         fail_key = f"login-fail:{key_id}"
         if not limiter().test(item(s.login_fail_limit), fail_key):
             raise TooManyRequests("login_locked")
-        user = await user_by_email(db, email)
+        user = await user_by_email(db, email, lock=True)  # locked: two parallel logins cannot both spend the same authenticator code
     else:
         phone = normalize_phone(raw_phone or "")
         fail_key = f"login-fail:{hasher().phone(phone)}"
         if not limiter().test(item(s.login_fail_limit), fail_key):
             raise TooManyRequests("login_locked")
-        user = await user_by_phone(db, phone)
+        user = await user_by_phone(db, phone, lock=True)
     ok = await to_thread.run_sync(verify_password, user.password_hash if user and user.password_hash else _DUMMY_HASH, password)
     if user is None or not user.password_hash or not ok:
         limiter().hit(item(s.login_fail_limit), fail_key)
@@ -315,7 +345,7 @@ async def issue_pair(db: AsyncSession, user: User, product: str, app: str, role:
 
 async def refresh(db: AsyncSession, refresh_token: str) -> dict:
     now = utcnow()
-    stored = await db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash(refresh_token)))
+    stored = await db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash(refresh_token)).with_for_update())  # locked: parallel use of one token
     if stored is None or stored.revoked_at is not None or stored.expires_at <= now:
         raise Unauthorized("session_expired")
     if stored.rotated_at is not None:
@@ -352,7 +382,7 @@ async def change_password(db: AsyncSession, user_id: uuid.UUID, current: str, ne
     user = await db.get(User, user_id)
     if user is None or not user.password_hash or not await to_thread.run_sync(verify_password, user.password_hash, current):
         raise Unauthorized("invalid_credentials")
-    check_password(new)
+    check_password(new, user_phone(user))
     user.password_hash = await to_thread.run_sync(hash_password, new)
     user.must_change_password, user.temp_password_expires_at = False, None
     await claim_credentials(db, user.id)
@@ -394,7 +424,7 @@ async def create_staff(db: AsyncSession, *, raw_phone: str | None, raw_email: st
     secret = pyotp.random_base32() if role in cfg.get("totp_roles", []) else None
     user = User(phone_enc=cipher().encrypt(phone) if phone else None, phone_hash=hasher().phone(phone) if phone else None,
                 email_enc=cipher().encrypt(email) if email else None, email_hash=hasher().hash(email, "email") if email else None,
-                display_name=display_name.strip()[:80],
+                display_name=clean_name(display_name),
                 password_hash=await to_thread.run_sync(hash_password, temp), status="active", must_change_password=True,
                 temp_password_expires_at=now + timedelta(hours=72), totp_secret_enc=cipher().encrypt(secret) if secret else None)
     user.memberships = [Membership(product=product, role=role, created_by=admin_id)]

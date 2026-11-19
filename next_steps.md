@@ -235,3 +235,7 @@ Not run: on a device/emulator, a store build, the web admin panel build.
 2. Certificate pinning/CA for `auth-api.regisse.com` in the admin app if it pins (check `lib/core`; the customer app does).
 3. Runbook (admins): backups; `import-flariane-admins` dry run, apply; verify with `smoke_admin_sso.sh`; ship the admin app build with `AUTH_BASE_URL`; `--cutover --apply`; `FLR_SSO_ADMIN_ONLY=true`.
 4. Open decisions from step 3g still stand (new staff only in auth cannot enter flariane yet; `totp_exempt` policy; fail-open default; user management in flariane's panel vs auth).
+
+## Step 4: auth security review (2026-11-19)
+
+Report: `docs/platform/AUTH_SECURITY_REVIEW.md` (14 findings fixed with tests, residual risks, and findings outside auth). auth suite **70/70**, kit unchanged, live e2e 38/38 and flariane SSO smoke 5/5 after the changes; each fix mutation-checked (fix removed on a copy -> matching test fails). **Most urgent follow-ups outside auth:** flariane's pinned dependencies (pillow 71 known vulns, starlette, cryptography, PyJWT, python-multipart, requests) and fidelia's `python-jose`/`ecdsa`/`pyasn1`; both need their own branch + upgrade + regression run. Auth residual risk 1 (key rotation envelope) must be done before real users.

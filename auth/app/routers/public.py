@@ -9,7 +9,7 @@ from app import tokens
 from app.audit import client_ip
 from app.config import get_settings
 from app.db import get_session
-from app.deps import Principal, current_principal
+from app.deps import Principal, current_principal, service_caller
 from app.errors import Forbidden, Unauthorized
 from app.models import User
 from app.services import accounts
@@ -79,7 +79,8 @@ async def register(data: RegisterIn, request: Request, db: AsyncSession = Depend
 
 
 @router.post("/activate")
-async def activate(data: ActivateIn, db: AsyncSession = Depends(get_session)) -> dict:
+async def activate(data: ActivateIn, request: Request, db: AsyncSession = Depends(get_session)) -> dict:
+    accounts.ip_limit(get_settings().activate_ip_limit, "activate", client_ip(request))
     await accounts.activate(db, raw_phone=data.phone, code=data.code)
     await db.commit()
     return {"status": "active"}
@@ -93,7 +94,8 @@ async def login(data: LoginIn, request: Request, db: AsyncSession = Depends(get_
 
 
 @router.post("/refresh")
-async def refresh(data: RefreshIn, db: AsyncSession = Depends(get_session)) -> dict:
+async def refresh(data: RefreshIn, request: Request, db: AsyncSession = Depends(get_session)) -> dict:
+    accounts.ip_limit(get_settings().refresh_ip_limit, "refresh", client_ip(request))
     out = await accounts.refresh(db, data.refresh_token)
     await db.commit()
     return out
@@ -137,16 +139,16 @@ async def me(p: Principal = Depends(current_principal), db: AsyncSession = Depen
 
 
 @router.post("/introspect")
-async def introspect(data: IntrospectIn, x_service_key: str | None = Header(default=None), db: AsyncSession = Depends(get_session)) -> dict:
+async def introspect(data: IntrospectIn, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
     """Online check for sensitive routes (money): is this token's session still alive and the user still active?
-    Called by a product with its service key; products verify signatures locally for everything else."""
-    keys = get_settings().service_keys
-    if not x_service_key or x_service_key not in keys.values():
-        raise Forbidden("service_key_required")
+    Called by a product with its service key, and only about tokens issued FOR that product; products verify signatures
+    locally for everything else."""
     try:
         claims = await tokens.decode_token(db, data.token)
     except Unauthorized:
         return {"active": False}
+    if claims["aud"] != caller:
+        return {"active": False}  # a product's key says nothing about another product's tokens
     user = await db.get(User, uuid.UUID(claims["sub"]))
     held = accounts._roles_for(user, claims["aud"]) if user else []
     alive = user is not None and user.status == "active" and claims["role"] in held and await accounts.session_active(db, claims["sid"])
@@ -158,18 +160,15 @@ class SessionCheckIn(BaseModel):
 
 
 @router.post("/sessions/check")
-async def sessions_check(data: SessionCheckIn, x_service_key: str | None = Header(default=None), db: AsyncSession = Depends(get_session)) -> dict:
+async def sessions_check(data: SessionCheckIn, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
     """For a product that keeps its own session next to an auth login (flariane back office): is the auth session `sid` still
-    alive (not logged out, not revoked, user not disabled, role still held)? Service key required; answers only yes/no."""
-    keys = get_settings().service_keys
-    if not x_service_key or x_service_key not in keys.values():
-        raise Forbidden("service_key_required")
+    alive (not logged out, not revoked, user not disabled, role still held)? Service key required, for the key's own product only."""
     from sqlalchemy import select as _select
 
     from app.models import RefreshToken
 
     row = await db.scalar(_select(RefreshToken).where(RefreshToken.family == data.sid, RefreshToken.revoked_at.is_(None)).limit(1))
-    if row is None:
+    if row is None or row.product != caller:
         return {"active": False}
     user = await db.get(User, row.user_id)
     alive = user is not None and user.status == "active" and row.role in accounts._roles_for(user, row.product)

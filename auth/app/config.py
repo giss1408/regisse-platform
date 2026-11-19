@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # Rate limits
     register_per_ip_hour: int = 10
     login_fail_limit: str = "5/15minute"
+    # Per client IP, loose on purpose (carriers share IPs): stops one machine trying many accounts, not one account.
+    login_ip_limit: str = "60/15minute"
+    activate_ip_limit: str = "30/15minute"
+    refresh_ip_limit: str = "120/minute"
     reset_request_limit: str = "3/hour"
 
     @field_validator("database_url")
