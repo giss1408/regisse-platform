@@ -15,6 +15,11 @@ if [ ! -f "$SECRET" ]; then
   umask 077; printf 'E2E_ADMIN_EMAIL=e2e@flariane.test\nE2E_ADMIN_PASSWORD=%s\nE2E_ADMIN_TOTP_SECRET=%s\n' "$PW" "$totp" > "$SECRET"
 fi
 
+# Repeated runs from one IP trip flariane's real rate limits (sign-ups, password resets: per hour). Clear only the
+# limiter keys (not the Celery queues) so every run starts clean. Local/test stack only.
+IDX=$(grep -o '/[0-9]*$' "$ROOT/infra/secrets/flariane.env" | head -1 | tr -d /)
+docker compose exec -T redis sh -c "redis-cli --no-auth-warning -a \"\$REDIS_ADMIN_PASSWORD\" -n ${IDX:-2} --scan --pattern 'LIMITS*' | xargs -r -n 50 redis-cli --no-auth-warning -a \"\$REDIS_ADMIN_PASSWORD\" -n ${IDX:-2} del >/dev/null" || true
+
 CADDY_IP=$(docker inspect infra-caddy-1 --format '{{(index .NetworkSettings.Networks "infra_net").IPAddress}}')
 run_e2e() {
   docker run --rm --network infra_net --add-host "flariane-api.${DOMAIN}:${CADDY_IP}" --env-file "$SECRET" \

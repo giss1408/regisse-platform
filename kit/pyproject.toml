@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "regisse-kit"
+version = "0.1.0"
+description = "Shared, framework-neutral building blocks for the com_regisse backends (crypto, phone, OTP codes, webhooks, health)."
+requires-python = ">=3.12"
+dependencies = [
+  "argon2-cffi>=23.1",
+  "cryptography>=43",
+]
+
+[project.optional-dependencies]
+fastapi = ["fastapi>=0.115"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fastapi>=0.115"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
