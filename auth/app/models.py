@@ -29,8 +29,14 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     phone_enc: Mapped[bytes | None] = mapped_column(LargeBinary)  # None once rejected/anonymised
     phone_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    # Staff may have an email instead of (or next to) a phone: the login identifier for back-office users.
+    email_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
+    email_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(80))
     password_hash: Mapped[str | None] = mapped_column(String(200))
+    # Migrated accounts that never had an authenticator code (flariane `totp_required=false`): kept as they were, never for
+    # super_admin/admin. A policy to review: the target is a code for every back-office role.
+    totp_exempt: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # pending_activation | active | disabled | rejected
     status: Mapped[str] = mapped_column(String(24), default="pending_activation", index=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)

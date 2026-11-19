@@ -169,3 +169,92 @@ async def _erase(db: AsyncSession, mapping: LegacyIdentity, r: dict, apply: bool
         user.status = "disabled"
         await accounts.revoke_all_sessions(db, user.id)
         await db.flush()
+
+
+# --- back-office users (flariane admin_users) ------------------------------------------------------------------------------
+
+
+async def import_admin_rows(db: AsyncSession, rows: Iterable[dict[str, Any]], *, product: str, apply: bool, refresh: bool = False) -> dict:
+    """Staff of a product's back office (namespace `<product>.admin` in legacy_identities). Row keys: id, email, name,
+    password_hash, totp_secret (plain, in memory only, re-encrypted with auth's key so the SAME authenticator app keeps working),
+    totp_required, role (any case), active. Devices are not migrated: the product keeps its own device approval.
+    Same rules as customers: idempotent, dry run, refresh only while credentials_authority is "legacy"."""
+    ns = f"{product}.admin"
+    stats = {"total": 0, "created": 0, "skipped_already_imported": 0, "errors": [], "refresh": {"password": 0, "totp": 0, "role": 0, "disabled": 0, "frozen_skipped": 0, "unchanged": 0}}
+    for row in rows:
+        stats["total"] += 1
+        legacy_id = str(row["id"])
+        try:
+            async with db.begin_nested():
+                role = str(row["role"]).lower()
+                email = accounts.normalize_email(row["email"])
+                mapping = await db.scalar(select(LegacyIdentity).where(LegacyIdentity.product == ns, LegacyIdentity.legacy_id == legacy_id))
+                if mapping is not None:
+                    stats["skipped_already_imported"] += 1
+                    if refresh:
+                        await _refresh_admin(db, mapping, row, role, product, stats["refresh"], apply)
+                    continue
+                if await accounts.user_by_email(db, email) is not None:
+                    raise ValueError("email_taken")  # an auth account already uses this email: a human links them
+                known = {r for roles in accounts.product_config(product)["apps"].values() for r in roles}
+                if role not in known:
+                    raise ValueError("unknown_role")
+                if not row.get("totp_secret") and row.get("totp_required", True):
+                    raise ValueError("no_totp_secret")
+                user = User(
+                    email_enc=accounts.cipher().encrypt(email), email_hash=accounts.hasher().hash(email, "email"), display_name=(row.get("name") or None) and row["name"].strip()[:80],
+                    password_hash=row.get("password_hash"), status="active" if row.get("active", True) else "disabled",
+                    totp_secret_enc=accounts.cipher().encrypt(row["totp_secret"]) if row.get("totp_secret") else None,
+                    totp_exempt=not row.get("totp_required", True) and role not in ("super_admin", "admin"),
+                )
+                user.memberships = [Membership(product=product, role=role)]
+                stats["created"] += 1
+                if apply:
+                    db.add(user)
+                    await db.flush()
+                    db.add(LegacyIdentity(product=ns, legacy_id=legacy_id, user_id=user.id))
+                    await db.flush()
+        except Exception as exc:  # noqa: BLE001: report the row, never its content
+            stats["errors"].append({"legacy_id": legacy_id, "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+    return stats
+
+
+async def _refresh_admin(db: AsyncSession, mapping: LegacyIdentity, row: dict[str, Any], role: str, product: str, r: dict, apply: bool) -> None:
+    if mapping.credentials_authority == "auth":
+        r["frozen_skipped"] += 1
+        return
+    user = await db.get(User, mapping.user_id)
+    if user is None:
+        return
+    changed = False
+    if row.get("password_hash") != user.password_hash:
+        r["password"] += 1
+        changed = True
+        if apply:
+            user.password_hash = row.get("password_hash")
+            await accounts.revoke_all_sessions(db, user.id)
+    new_secret = row.get("totp_secret")
+    if new_secret and (not user.totp_secret_enc or accounts.cipher().decrypt(user.totp_secret_enc) != new_secret):
+        r["totp"] += 1
+        changed = True
+        if apply:
+            user.totp_secret_enc, user.totp_last_step = accounts.cipher().encrypt(new_secret), 0
+    held = [m for m in user.memberships if m.product == product]
+    if role not in [m.role for m in held]:
+        r["role"] += 1
+        changed = True
+        if apply:
+            for m in held:
+                await db.delete(m)
+            db.add(Membership(user_id=user.id, product=product, role=role))
+            await accounts.revoke_all_sessions(db, user.id)  # a different role: sign in again
+    if not row.get("active", True) and user.status != "disabled":
+        r["disabled"] += 1
+        changed = True
+        if apply:
+            user.status = "disabled"
+            await accounts.revoke_all_sessions(db, user.id)
+    if not changed:
+        r["unchanged"] += 1
+    if apply:
+        await db.flush()

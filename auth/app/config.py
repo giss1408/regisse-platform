@@ -16,9 +16,9 @@ DEFAULT_PRODUCTS: dict = {
         "totp_roles": ["super_admin", "admin"],
     },
     "flariane": {
-        "apps": {"customer": ["customer"], "admin": ["super_admin", "operator", "viewer"]},
+        "apps": {"customer": ["customer"], "admin": ["super_admin", "operator", "viewer", "pickup"]},
         "self_register": {"app": "customer", "role": "customer"},
-        "totp_roles": ["super_admin", "operator", "viewer"],
+        "totp_roles": ["super_admin", "operator", "viewer", "pickup"],
     },
     "fidelia": {
         "apps": {

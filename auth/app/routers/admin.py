@@ -10,7 +10,7 @@ from app.audit import audit, client_ip
 from app.config import get_settings
 from app.db import get_session
 from app.deps import Principal, current_admin, current_super_admin
-from app.errors import Conflict, Forbidden, NotFound
+from app.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.models import Membership, RelayRequest, User
 from app.services import accounts
 from app.tokens import utcnow
@@ -66,8 +66,10 @@ async def relay_reject(request_id: int, request: Request, admin: Principal = Dep
 
 
 @router.get("/users/search")
-async def search_user(phone: str, _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
-    user = await accounts.user_by_phone(db, accounts.normalize_phone(phone))
+async def search_user(phone: str | None = None, email: str | None = None, _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+    if bool(phone) == bool(email):
+        raise BadRequest("phone_or_email")
+    user = await accounts.user_by_phone(db, accounts.normalize_phone(phone)) if phone else await accounts.user_by_email(db, accounts.normalize_email(email or ""))
     if user is None:
         raise NotFound("user_not_found")
     return {"id": str(user.id), "display_name": user.display_name, "status": user.status,
@@ -157,7 +159,8 @@ async def revoke_membership(data: MembershipIn, request: Request, admin: Princip
 
 
 class StaffIn(BaseModel):
-    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=32)]
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=32)] | None = None
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=254)] | None = None
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
     product: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]{1,31}$")]
     role: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z_]{1,31}$")]
@@ -170,7 +173,7 @@ class StaffResetIn(BaseModel):
 @router.post("/staff", status_code=201)
 async def create_staff(data: StaffIn, request: Request, admin: Principal = Depends(current_super_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """Super admin only. Returns the temporary password (and authenticator secret when the role needs one) ONCE, to hand over in person."""
-    out = await accounts.create_staff(db, raw_phone=data.phone, display_name=data.display_name, product=data.product, role=data.role,
+    out = await accounts.create_staff(db, raw_phone=data.phone, raw_email=data.email, display_name=data.display_name, product=data.product, role=data.role,
                                       admin_id=admin.user_id, ip=client_ip(request))
     await db.commit()
     return out

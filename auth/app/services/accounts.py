@@ -25,7 +25,7 @@ from app.tokens import utcnow
 
 # A hash to check against when the phone is unknown, so response time does not reveal which numbers have accounts.
 _DUMMY_HASH = hash_password("dummy-password-for-timing")
-PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "agent"}
+PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent"}
 CONSENT_VERSION = "2026-11"
 
 
@@ -59,6 +59,20 @@ def check_password(password: str) -> None:
         kit_passwords.check_password_strength(password)
     except kit_passwords.WeakPassword as exc:
         raise BadRequest("weak_password", str(exc)) from None
+
+
+_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,200}\.[^@\s.]{2,}$")
+
+
+def normalize_email(raw: str) -> str:
+    e = (raw or "").strip().lower()
+    if not _EMAIL.match(e) or len(e) > 254:
+        raise BadRequest("invalid_email")
+    return e
+
+
+async def user_by_email(db: AsyncSession, email: str) -> User | None:
+    return await db.scalar(select(User).where(User.email_hash == hasher().hash(email, "email")))
 
 
 async def user_by_phone(db: AsyncSession, e164: str) -> User | None:
@@ -226,15 +240,24 @@ def pick_role(user: User, product: str, app: str) -> tuple[str, list[str]]:
     return role, held
 
 
-async def login(db: AsyncSession, *, raw_phone: str, password: str, product: str, app: str, totp: str | None, ip: str | None) -> dict:
+async def login(db: AsyncSession, *, raw_phone: str | None = None, raw_email: str | None = None, password: str, product: str, app: str, totp: str | None, ip: str | None) -> dict:
     s = get_settings()
     cfg = product_config(product)
-    phone = normalize_phone(raw_phone)
-    ph = hasher().phone(phone)
-    fail_key = f"login-fail:{ph}"
-    if not limiter().test(item(s.login_fail_limit), fail_key):
-        raise TooManyRequests("login_locked")
-    user = await user_by_phone(db, phone)
+    if bool(raw_phone) == bool(raw_email):
+        raise BadRequest("phone_or_email")
+    if raw_email:
+        email = normalize_email(raw_email)
+        key_id, user = hasher().hash(email, "email"), None
+        fail_key = f"login-fail:{key_id}"
+        if not limiter().test(item(s.login_fail_limit), fail_key):
+            raise TooManyRequests("login_locked")
+        user = await user_by_email(db, email)
+    else:
+        phone = normalize_phone(raw_phone or "")
+        fail_key = f"login-fail:{hasher().phone(phone)}"
+        if not limiter().test(item(s.login_fail_limit), fail_key):
+            raise TooManyRequests("login_locked")
+        user = await user_by_phone(db, phone)
     ok = await to_thread.run_sync(verify_password, user.password_hash if user and user.password_hash else _DUMMY_HASH, password)
     if user is None or not user.password_hash or not ok:
         limiter().hit(item(s.login_fail_limit), fail_key)
@@ -248,7 +271,7 @@ async def login(db: AsyncSession, *, raw_phone: str, password: str, product: str
         raise Unauthorized("temp_password_expired")  # said only once the password itself was right
     role, held = pick_role(user, product, app)
     amr = ["pwd"]
-    if role in cfg.get("totp_roles", []):
+    if role in cfg.get("totp_roles", []) and not (user.totp_exempt and role not in ("super_admin", "admin")):
         if not user.totp_secret_enc:
             raise Forbidden("totp_not_set_up")
         code = (totp or "").strip()
@@ -278,11 +301,12 @@ async def issue_pair(db: AsyncSession, user: User, product: str, app: str, role:
     now = utcnow()
     db.add(RefreshToken(user_id=user.id, token_hash=token_hash(refresh), family=family, product=product, app=app, role=role,
                         amr=",".join(amr), auth_time=auth_time, expires_at=now + timedelta(days=s.refresh_days)))
-    phone = user_phone(user) or ""
+    phone = user_phone(user)
     ttl = timedelta(minutes=s.access_token_minutes)
-    lid = await db.scalar(select(LegacyIdentity.legacy_id).where(LegacyIdentity.product == product, LegacyIdentity.user_id == user.id))
+    ns = product if app == "customer" else f"{product}.{app}"  # legacy ids of staff live in their own namespace (flariane.admin)
+    lid = await db.scalar(select(LegacyIdentity.legacy_id).where(LegacyIdentity.product == ns, LegacyIdentity.user_id == user.id))
     access = await tokens.issue_access_token(
-        db, sub=user.id, phone_key=kit_phone.phone_key(phone), product=product, app=app, role=role, roles=held, amr=amr,
+        db, sub=user.id, phone_key=kit_phone.phone_key(phone) if phone else "", product=product, app=app, role=role, roles=held, amr=amr,
         auth_time=auth_time, sid=family, must_change_password=user.must_change_password, ttl=ttl, legacy_id=lid,
     )
     return {"access_token": access, "refresh_token": refresh, "token_type": "bearer", "expires_in": int(ttl.total_seconds()), "role": role,
@@ -349,39 +373,47 @@ def _temp_password(n: int = 12) -> str:
     return "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(n))
 
 
-async def create_staff(db: AsyncSession, *, raw_phone: str, display_name: str, product: str, role: str, admin_id: uuid.UUID, ip: str | None) -> dict:
+async def create_staff(db: AsyncSession, *, raw_phone: str | None, raw_email: str | None = None, display_name: str, product: str, role: str, admin_id: uuid.UUID, ip: str | None) -> dict:
     """Creates an ACTIVE staff account with a one-time temporary password (and an authenticator secret for roles that need one).
-    Both are returned once to the super admin, who hands them over in person: they never travel by WhatsApp."""
+    Both are returned once to the super admin, who hands them over in person: they never travel by WhatsApp.
+    A staff account has a phone, an email, or both (the login identifier)."""
     cfg = product_config(product)
     known = {r for roles in cfg["apps"].values() for r in roles}
     if role not in known or role not in PRIVILEGED_ROLES:
         raise BadRequest("not_a_staff_role")
-    phone = normalize_phone(raw_phone)
-    if await user_by_phone(db, phone) is not None:
+    if not raw_phone and not raw_email:
+        raise BadRequest("phone_or_email")
+    phone = normalize_phone(raw_phone) if raw_phone else None
+    email = normalize_email(raw_email) if raw_email else None
+    if phone and await user_by_phone(db, phone) is not None:
         raise Conflict("phone_taken")
+    if email and await user_by_email(db, email) is not None:
+        raise Conflict("email_taken")
     now = utcnow()
     temp = _temp_password()
     secret = pyotp.random_base32() if role in cfg.get("totp_roles", []) else None
-    user = User(phone_enc=cipher().encrypt(phone), phone_hash=hasher().phone(phone), display_name=display_name.strip()[:80],
+    user = User(phone_enc=cipher().encrypt(phone) if phone else None, phone_hash=hasher().phone(phone) if phone else None,
+                email_enc=cipher().encrypt(email) if email else None, email_hash=hasher().hash(email, "email") if email else None,
+                display_name=display_name.strip()[:80],
                 password_hash=await to_thread.run_sync(hash_password, temp), status="active", must_change_password=True,
                 temp_password_expires_at=now + timedelta(hours=72), totp_secret_enc=cipher().encrypt(secret) if secret else None)
     user.memberships = [Membership(product=product, role=role, created_by=admin_id)]
     db.add(user)
     await db.flush()
     await audit(db, actor_type="admin", actor_id=admin_id, action="staff.created", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "role": role})
-    return _staff_secrets(user, phone, temp, secret)
+    return _staff_secrets(user, phone or email or "", temp, secret)
 
 
-def _staff_secrets(user: User, phone: str, temp: str, secret: str | None) -> dict:
+def _staff_secrets(user: User, ident: str, temp: str, secret: str | None) -> dict:
     out: dict = {"user_id": str(user.id), "temporary_password": temp, "temporary_password_valid_hours": 72, "totp": None}
     if secret:
-        out["totp"] = {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=kit_phone.phone_key(phone), issuer_name="regisse auth")}
+        out["totp"] = {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=ident, issuer_name="regisse auth")}
     return out
 
 
 async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool, admin_id: uuid.UUID, ip: str | None) -> dict:
     user = await db.get(User, user_id)
-    if user is None or user.phone_enc is None:
+    if user is None or (user.phone_enc is None and user.email_enc is None):
         raise NotFound("user_not_found")
     if admin_id == user.id:
         raise Conflict("cannot_reset_self")
@@ -397,7 +429,7 @@ async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool,
         user.totp_secret_enc, user.totp_last_step = cipher().encrypt(secret), 0
     await revoke_all_sessions(db, user.id)
     await audit(db, actor_type="admin", actor_id=admin_id, action="staff.reset", entity="user", entity_id=user.id, ip=ip, detail={"totp_reset": reset_totp})
-    return _staff_secrets(user, user_phone(user) or "", temp, secret)
+    return _staff_secrets(user, user_phone(user) or (cipher().decrypt(user.email_enc) if user.email_enc else ""), temp, secret)
 
 
 async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str, ip: str | None, *, check_only: bool = False) -> None:

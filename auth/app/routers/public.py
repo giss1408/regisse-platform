@@ -39,7 +39,8 @@ class ActivateIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    phone: Phone
+    phone: Phone | None = None
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=254)] | None = None  # back-office users
     password: str = Field(min_length=1, max_length=200)
     product: Product
     app: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{1,31}$")]
@@ -86,7 +87,7 @@ async def activate(data: ActivateIn, db: AsyncSession = Depends(get_session)) ->
 
 @router.post("/login")
 async def login(data: LoginIn, request: Request, db: AsyncSession = Depends(get_session)) -> dict:
-    out = await accounts.login(db, raw_phone=data.phone, password=data.password, product=data.product, app=data.app, totp=data.totp, ip=client_ip(request))
+    out = await accounts.login(db, raw_phone=data.phone, raw_email=data.email, password=data.password, product=data.product, app=data.app, totp=data.totp, ip=client_ip(request))
     await db.commit()
     return out
 
@@ -150,3 +151,26 @@ async def introspect(data: IntrospectIn, x_service_key: str | None = Header(defa
     held = accounts._roles_for(user, claims["aud"]) if user else []
     alive = user is not None and user.status == "active" and claims["role"] in held and await accounts.session_active(db, claims["sid"])
     return {"active": bool(alive), "sub": claims["sub"], "aud": claims["aud"], "role": claims["role"]} if alive else {"active": False}
+
+
+class SessionCheckIn(BaseModel):
+    sid: str = Field(min_length=8, max_length=64)
+
+
+@router.post("/sessions/check")
+async def sessions_check(data: SessionCheckIn, x_service_key: str | None = Header(default=None), db: AsyncSession = Depends(get_session)) -> dict:
+    """For a product that keeps its own session next to an auth login (flariane back office): is the auth session `sid` still
+    alive (not logged out, not revoked, user not disabled, role still held)? Service key required; answers only yes/no."""
+    keys = get_settings().service_keys
+    if not x_service_key or x_service_key not in keys.values():
+        raise Forbidden("service_key_required")
+    from sqlalchemy import select as _select
+
+    from app.models import RefreshToken
+
+    row = await db.scalar(_select(RefreshToken).where(RefreshToken.family == data.sid, RefreshToken.revoked_at.is_(None)).limit(1))
+    if row is None:
+        return {"active": False}
+    user = await db.get(User, row.user_id)
+    alive = user is not None and user.status == "active" and row.role in accounts._roles_for(user, row.product)
+    return {"active": bool(alive)}

@@ -109,6 +109,53 @@ async def import_flariane(apply: bool, refresh: bool = False, do_cutover: bool =
     print(json.dumps(stats, indent=2))
 
 
+async def import_flariane_admins(apply: bool, refresh: bool = False, do_cutover: bool = False) -> None:
+    """Back-office users of flariane (`admin_users`), read-only. The authenticator secret is decrypted with flariane's key in
+    memory and re-encrypted with auth's key: the same authenticator app keeps working. Devices stay in flariane."""
+    import json
+
+    from regisse_kit.crypto import FieldCipher
+    from regisse_kit.db_url import to_asyncpg_url
+    from sqlalchemy import text, update
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.models import LegacyIdentity
+    from app.services.legacy_import import import_admin_rows
+
+    src_url, key = os.environ.get("FLARIANE_DATABASE_URL"), os.environ.get("FLARIANE_FIELD_ENCRYPTION_KEY")
+    if not src_url or not key:
+        raise SystemExit("set FLARIANE_DATABASE_URL and FLARIANE_FIELD_ENCRYPTION_KEY")
+    flr = FieldCipher(key)
+    engine = create_async_engine(to_asyncpg_url(src_url))
+    rows: list[dict] = []
+    async with engine.connect() as conn:
+        await conn.execute(text("SET TRANSACTION READ ONLY"))
+        for r in (await conn.execute(text("select id, email, name, password_hash, totp_secret_enc, totp_required, role, active from admin_users order by id"))).mappings():
+            secret = None
+            if r["totp_secret_enc"]:
+                try:
+                    secret = flr.decrypt(r["totp_secret_enc"])
+                except Exception:  # wrong key: reported as no_totp_secret, never printed
+                    secret = None
+            rows.append({"id": r["id"], "email": r["email"], "name": r["name"], "password_hash": r["password_hash"], "totp_secret": secret,
+                         "totp_required": r["totp_required"], "role": r["role"], "active": r["active"]})
+    await engine.dispose()
+    async with SessionLocal() as db:
+        stats = await import_admin_rows(db, rows, product="flariane", apply=apply, refresh=refresh or do_cutover)
+        if do_cutover:
+            if not apply:
+                stats["cutover"] = "would freeze credentials (add --apply)"
+            elif stats["errors"]:
+                raise SystemExit("refusing to cut over with errors:\n" + json.dumps(stats["errors"]))
+            else:
+                res = await db.execute(update(LegacyIdentity).where(LegacyIdentity.product == "flariane.admin", LegacyIdentity.credentials_authority != "auth").values(credentials_authority="auth"))
+                stats["cutover_frozen_accounts"] = res.rowcount or 0
+        if apply:
+            await db.commit()
+    stats["mode"] = "APPLIED" if apply else "DRY-RUN (nothing written; add --apply)"
+    print(json.dumps(stats, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -117,6 +164,10 @@ def main() -> None:
     a.add_argument("--name", required=True)
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
+    adm = sub.add_parser("import-flariane-admins")
+    adm.add_argument("--apply", action="store_true")
+    adm.add_argument("--refresh", action="store_true")
+    adm.add_argument("--cutover", action="store_true")
     imp = sub.add_parser("import-flariane")
     imp.add_argument("--apply", action="store_true")
     imp.add_argument("--refresh", action="store_true", help="also sync phone/password/name/blocking of already-migrated accounts (legacy authority only)")
@@ -127,6 +178,8 @@ def main() -> None:
         asyncio.run(create_admin(args.phone, args.name, args.role))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
+    elif args.cmd == "import-flariane-admins":
+        asyncio.run(import_flariane_admins(args.apply, args.refresh, args.cutover))
     elif args.cmd == "import-flariane":
         asyncio.run(import_flariane(args.apply, args.refresh, args.cutover))
     else:
