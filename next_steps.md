@@ -109,3 +109,7 @@ Open: (a) TOTP at login for agents (proposal yes), (b) fidelia phone keys via `p
 ### Fidelia relay permissions (owner, final)
 Only `admin` and `super_admin` send activation/reset codes (relay queue in the admin app). Agents only enrol shops (pending until an admin sends the code, which doubles as review of the agent's data) and can be deactivated at any time by an admin or super admin (disable + session revoke). Agents need no TOTP; admin/super_admin use TOTP at login. Plan 6e role table and controls updated; decision 11 closed except the merchant wallet step-up (TOTP), still a proposal.
 Open: merchant TOTP step-up for wallet changes (confirm), fidelia phone keys via `ph` claim, BCEAO/ARTCI check, email provider for the fallback channel.
+
+### Merchant step-up and keys (owner)
+No authenticator app for merchants (too complicated). Wallet entry/change = **password re-entry** + compensating controls (proposal in plan 6e: 24 h delay before a changed wallet gets payouts, WhatsApp notices to the login number and old wallet, "not me" freeze, audit, lockouts, first-week payout cap). To confirm with owner: the 24 h delay and the payout cap amount. SSO assigns a UUID per account in the background; fidelia keeps phone keys via the `ph` claim for now (decision 9 answered, proceeding).
+Still open: confirm wallet-change controls, BCEAO/ARTCI check, email provider for fallback.
