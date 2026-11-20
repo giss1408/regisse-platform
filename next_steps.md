@@ -1,5 +1,7 @@
 # next_steps.md (resume file for the platform migration)
 
+Remote: `https://github.com/giss1408/regisse-platform.git` (origin, branch `main`; keep it PRIVATE; no secrets tracked).
+
 Plan: `../docs/platform/MIGRATION_PLAN.md` · Inventory: `../docs/platform/INVENTORY.md` · Skill: `~/.claude/skills/regisse-platform`
 Rule from owner: **no app has production users now** (2026-11-19), so cutovers need no rehearsal windows; still keep each step small, smoke-tested, e2e at the end. Update this file after every step.
 
