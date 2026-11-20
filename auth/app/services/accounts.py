@@ -701,7 +701,7 @@ def _service_roles(product: str) -> set[str]:
     return set(get_settings().products.get(product, {}).get("service_staff_roles", []))
 
 
-async def service_create_staff(db: AsyncSession, product: str, *, raw_phone: str | None, raw_email: str | None, display_name: str, role: str, ip: str | None) -> dict:
+async def service_create_staff(db: AsyncSession, product: str, *, raw_phone: str | None, raw_email: str | None, display_name: str, role: str, ip: str | None, allow_existing: bool = True) -> dict:
     """The product's backend enrols one of ITS staff (a role from `service_staff_roles`, never its admins; the product decides who may ask),
     the way fidelia enrols a merchant: a pending account with no password and an activation request in the product's relay queue. The
     team sends the WhatsApp code, the person types it with a password of her own (`/v1/activate`), then signs in with phone + password.
@@ -714,7 +714,7 @@ async def service_create_staff(db: AsyncSession, product: str, *, raw_phone: str
     existing = await user_by_phone(db, phone, lock=True)
     if existing is not None:
         mine = [m for m in existing.memberships if m.product == product]
-        if existing.status != "active" or not mine or any(m.role in PRIVILEGED_ROLES for m in existing.memberships):
+        if not allow_existing or existing.status != "active" or not mine or any(m.role in PRIVILEGED_ROLES for m in existing.memberships):
             raise Conflict("phone_taken")
         if not any(m.role == role for m in mine):
             db.add(Membership(user_id=existing.id, product=product, role=role))

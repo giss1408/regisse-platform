@@ -86,6 +86,9 @@ async def test_a_customer_of_the_product_gains_the_role_and_keeps_her_own_passwo
     assert (await client.post("/v1/login", json={"phone": "0702020202", "password": PASSWORD, **RETAILER})).json()["role"] == "retailer_staff"
     assert (await client.post("/v1/login", json={"phone": "0702020202", "password": PASSWORD, **CUSTOMER})).status_code == 200
     assert (await enrol(client, phone="0702020202")).json()["existing"] is True  # asking twice changes nothing
+    await make_user("0703030303", role="customer", product="supermarket")
+    refused = await client.post("/v1/service/staff", json={"phone": "0703030303", "display_name": "No Upgrade", "role": "retailer_staff", "allow_existing": False}, headers=SMK)
+    assert refused.status_code == 409 and refused.json()["detail"] == "phone_taken"  # a product with one role per person can refuse the upgrade
 
 
 async def test_a_number_that_belongs_to_someone_else_is_refused(client):

@@ -196,13 +196,15 @@ class ServiceStaffIn(BaseModel):
     phone: Phone
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
     role: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z_]{1,31}$")]
+    # False: a number that already has an account is refused (a product with ONE role per person cannot turn a customer into staff)
+    allow_existing: bool = True
 
 
 @router.post("/service/staff", status_code=201)
 async def service_staff_create(data: ServiceStaffIn, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
     """The product's backend enrols one of its staff (roles listed in the product's `service_staff_roles` only) by phone: a pending account, an
     activation code for the team to send on WhatsApp, a password chosen by the person. The product decides which of its own admins may call this."""
-    out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=None, display_name=data.display_name, role=data.role, ip=client_ip(request))
+    out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=None, display_name=data.display_name, role=data.role, ip=client_ip(request), allow_existing=data.allow_existing)
     await db.commit()
     return out
 
