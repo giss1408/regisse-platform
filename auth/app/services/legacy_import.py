@@ -33,7 +33,7 @@ async def import_rows(db: AsyncSession, rows: Iterable[dict[str, Any]], *, produ
     must_change_password, temp_password_expires_at, phone_verified_at, consent_at, consent_version, created_at, reset_requested.
     Datetimes are naive UTC. With apply=False nothing is written (same counters, what WOULD happen)."""
     stats = {"total": 0, "created": 0, "linked_existing": 0, "skipped_already_imported": 0, "skipped_anonymised": 0, "errors": [], "activation_requests": 0, "reset_requests": 0,
-             "refresh": {"phone": 0, "password": 0, "name": 0, "disabled": 0, "activated": 0, "erased": 0, "frozen_skipped": 0, "unchanged": 0}}
+             "refresh": {"phone": 0, "password": 0, "name": 0, "roles": 0, "disabled": 0, "activated": 0, "erased": 0, "frozen_skipped": 0, "unchanged": 0}}
     for row in rows:
         stats["total"] += 1
         legacy_id = str(row["id"])
@@ -73,7 +73,7 @@ async def import_rows(db: AsyncSession, rows: Iterable[dict[str, Any]], *, produ
                         phone_verified_at=row.get("phone_verified_at"), consent_at=row.get("consent_at"), consent_version=row.get("consent_version"),
                         created_at=row.get("created_at") or datetime.utcnow(),
                     )
-                    user.memberships = [Membership(product=product, role=role)]
+                    user.memberships = [Membership(product=product, role=r) for r in (row.get("roles") or [role])]
                     stats["created"] += 1
                     if apply:
                         db.add(user)
@@ -89,8 +89,10 @@ async def import_rows(db: AsyncSession, rows: Iterable[dict[str, Any]], *, produ
                 else:
                     # the person already has an auth account (maybe from another product): add access, keep her credentials
                     stats["linked_existing"] += 1
-                    if apply and not any(m.product == product and m.role == role for m in user.memberships):
-                        db.add(Membership(user_id=user.id, product=product, role=role))
+                    if apply:
+                        for r in (row.get("roles") or [role]):
+                            if not any(m.product == product and m.role == r for m in user.memberships):
+                                db.add(Membership(user_id=user.id, product=product, role=r))
                 if apply:
                     db.add(LegacyIdentity(product=product, legacy_id=legacy_id, user_id=user.id))
                     await db.flush()
@@ -125,6 +127,19 @@ async def _refresh_one(db: AsyncSession, mapping: LegacyIdentity, row: dict[str,
             await accounts.revoke_all_sessions(db, user.id)  # the old password no longer opens anything
     if apply:
         user.must_change_password, user.temp_password_expires_at = bool(row.get("must_change_password")), row.get("temp_password_expires_at")
+    if row.get("roles") is not None:  # the product still decides who holds which role (e.g. fidelia): follow it until the cutover
+        want = set(row["roles"])
+        held = {m.role for m in user.memberships if m.product == mapping.product}
+        if want != held:
+            r["roles"] += 1
+            changed = True
+            if apply:
+                for m in [m for m in user.memberships if m.product == mapping.product and m.role not in want]:
+                    await db.delete(m)
+                for role_name in want - held:
+                    db.add(Membership(user_id=user.id, product=mapping.product, role=role_name))
+                if held - want:
+                    await accounts.revoke_all_sessions(db, user.id)  # a role was taken away: sign in again
     name = (row.get("display_name") or None) and row["display_name"].strip()[:80]
     if name != user.display_name:
         r["name"] += 1

@@ -3,6 +3,7 @@
     AUTH_ADMIN_PASSWORD=... python -m app.cli create-admin --phone 0701020304 --name "Régis" --role super_admin
     python -m app.cli rotate-key
     FLARIANE_DATABASE_URL=... FLARIANE_FIELD_ENCRYPTION_KEY=... python -m app.cli import-flariane [--apply] [--refresh] [--cutover]
+    FIDELIA_DATABASE_URL=... python -m app.cli import-fidelia [--apply] [--refresh] [--cutover]
     python -m app.cli gen-keys
 """
 
@@ -156,6 +157,54 @@ async def import_flariane_admins(apply: bool, refresh: bool = False, do_cutover:
     print(json.dumps(stats, indent=2))
 
 
+async def import_fidelia(apply: bool, refresh: bool = False, do_cutover: bool = False) -> None:
+    """Fidelia's `users` table, read-only (FIDELIA_DATABASE_URL). Phones are stored in clear there and password hashes are argon2id, so
+    nothing needs decrypting and every password keeps working. A person with several roles gets one membership per role.
+    Admins land WITHOUT an authenticator secret: a super admin gives each one a new password and a code with the staff reset
+    (`POST /v1/admin/staff/{id}/reset` with reset_totp). Privileged accounts (agent, admin) are imported once and then managed in auth."""
+    import json
+
+    from regisse_kit.db_url import to_asyncpg_url
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.services.legacy_import import cutover, import_rows
+
+    src_url = os.environ.get("FIDELIA_DATABASE_URL")
+    if not src_url:
+        raise SystemExit("set FIDELIA_DATABASE_URL")
+    known = {"customer", "merchant", "cashier", "agent", "admin"}
+    engine = create_async_engine(to_asyncpg_url(src_url))
+    rows: list[dict] = []
+    async with engine.connect() as conn:
+        await conn.execute(text("SET TRANSACTION READ ONLY"))
+        for r in (await conn.execute(text("select * from users order by id"))).mappings():
+            roles = sorted({x for x in (r["roles"] or "").split(",") if x in known}) or ["customer"]
+            pw, verified = r.get("password_hash"), r.get("phone_verified_at")
+            # no password + not proven = an SMS-era account (the code proved the number): active, reset the password later;
+            # a password but a number never proven: it waits for the activation code like a new sign-up
+            staff = bool({"agent", "admin"} & set(roles))  # the relay never serves staff: they are activated in auth by a super admin
+            status = "disabled" if r["disabled"] else ("pending" if (pw and verified is None and not staff) else "active")
+            rows.append({"id": r["id"], "phone": r["phone_e164"], "display_name": None, "password_hash": pw, "status": status, "roles": roles,
+                         "must_change_password": bool(r.get("must_change_password")), "temp_password_expires_at": None, "phone_verified_at": verified,
+                         "consent_at": None, "consent_version": None, "created_at": r["created_at"], "reset_requested": False})
+    await engine.dispose()
+    async with SessionLocal() as db:
+        stats = await import_rows(db, rows, product="fidelia", role="customer", apply=apply, refresh=refresh or do_cutover)
+        stats["admins_needing_totp_setup"] = sum(1 for x in rows if "admin" in x["roles"] and x["status"] != "disabled")
+        if do_cutover:
+            if not apply:
+                stats["cutover"] = "would freeze credentials (add --apply)"
+            elif stats["errors"]:
+                raise SystemExit("refusing to cut over with errors:\n" + json.dumps(stats["errors"]))
+            else:
+                stats["cutover_frozen_accounts"] = await cutover(db, product="fidelia")
+        if apply:
+            await db.commit()
+    stats["mode"] = "APPLIED" if apply else "DRY-RUN (nothing written; add --apply)"
+    print(json.dumps(stats, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -164,6 +213,10 @@ def main() -> None:
     a.add_argument("--name", required=True)
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
+    fid = sub.add_parser("import-fidelia")
+    fid.add_argument("--apply", action="store_true")
+    fid.add_argument("--refresh", action="store_true")
+    fid.add_argument("--cutover", action="store_true")
     adm = sub.add_parser("import-flariane-admins")
     adm.add_argument("--apply", action="store_true")
     adm.add_argument("--refresh", action="store_true")
@@ -178,6 +231,8 @@ def main() -> None:
         asyncio.run(create_admin(args.phone, args.name, args.role))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
+    elif args.cmd == "import-fidelia":
+        asyncio.run(import_fidelia(args.apply, args.refresh, args.cutover))
     elif args.cmd == "import-flariane-admins":
         asyncio.run(import_flariane_admins(args.apply, args.refresh, args.cutover))
     elif args.cmd == "import-flariane":
