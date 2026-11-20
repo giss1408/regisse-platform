@@ -90,6 +90,35 @@ def _guard_staff_target(admin: Principal, user: User) -> None:
         raise Forbidden("super_admin_only")
 
 
+class ActivateNowIn(BaseModel):
+    note: str = Field(min_length=10, max_length=300)  # who was called, on which number, what was checked
+
+
+@router.get("/phone-changes")
+async def phone_changes(status: Literal["scheduled", "requested", "all"] = "scheduled", _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> list[dict]:
+    """Number changes waiting for their delay (or for the code): who, which product, when they take effect."""
+    from app.models import PhoneChange
+
+    q = select(PhoneChange).order_by(PhoneChange.created_at)
+    if status != "all":
+        q = q.where(PhoneChange.status == status)
+    out = []
+    for pc in (await db.scalars(q.limit(200))).all():
+        u = await db.get(User, pc.user_id)
+        out.append({"id": pc.id, "product": pc.product, "status": pc.status, "display_name": u.display_name if u else None,
+                    "new_phone_masked": accounts.kit_phone.mask_phone(accounts.cipher().decrypt(pc.new_phone_enc)),
+                    "effective_at": pc.effective_at.isoformat() + "Z" if pc.effective_at else None, "user_id": str(pc.user_id)})
+    return out
+
+
+@router.post("/phone-changes/{change_id}/activate-now")
+async def phone_change_activate_now(change_id: int, data: ActivateNowIn, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+    """After calling the person on the number she was using: the scheduled change takes effect now. A written note is required and kept in the audit."""
+    masked = await accounts.phone_change_activate_now(db, change_id, admin.user_id, data.note, client_ip(request))
+    await db.commit()
+    return {"status": "done", "phone_masked": masked}
+
+
 @router.post("/phone-changes/{change_id}/not-me")
 async def phone_change_not_me(change_id: int, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """"This wasn't me" on a number change (reported by WhatsApp reply or a call): cancels a pending request or puts a confirmed change back,

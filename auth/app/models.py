@@ -105,8 +105,9 @@ class PhoneChange(Base):
     product: Mapped[str] = mapped_column(String(32))  # the product she asked from
     new_phone_enc: Mapped[bytes] = mapped_column(LargeBinary)
     new_phone_hash: Mapped[str] = mapped_column(String(64))
+    effective_at: Mapped[datetime | None] = _ts()  # when a scheduled change takes effect (the security delay)
     old_phone_enc: Mapped[bytes | None] = mapped_column(LargeBinary)  # to warn the old number, and to put it back on "this wasn't me"
-    status: Mapped[str] = mapped_column(String(12), default="requested")  # requested | done | replaced | cancelled | reverted
+    status: Mapped[str] = mapped_column(String(12), default="requested")  # requested | scheduled | done | replaced | cancelled | reverted | failed
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     completed_at: Mapped[datetime | None] = _ts()
 

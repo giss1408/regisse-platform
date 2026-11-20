@@ -13,6 +13,7 @@ ok = bad = 0
 
 def check(name, cond, extra=""):
     global ok, bad
+    cond = bool(cond)
     print(("  PASS  " if cond else "  FAIL  ") + name + (f"  {extra}" if not cond else ""))
     ok, bad = ok + cond, bad + (not cond)
 
@@ -59,16 +60,26 @@ url = c.post(f"/v1/admin/relay/{q['id']}/send", headers=H).json()["url"]
 check("the WhatsApp link goes to the NEW number", f"225{new}" in url and f"225{old}" not in url)
 code = code_of(url)
 check("a wrong code changes nothing", c.post("/v1/me/phone/confirm", headers=ha, json={"code": "000000"}).status_code == 400)
-check("the right code confirms", c.post("/v1/me/phone/confirm", headers=ha, json={"code": code}).status_code == 200)
-check("the other device is signed out", c.post("/v1/refresh", json={"refresh_token": b["refresh_token"]}).status_code == 401)
-rn = c.post("/v1/refresh", json={"refresh_token": a["refresh_token"]})
+cf = c.post("/v1/me/phone/confirm", headers=ha, json={"code": code})
+check("the right code only SCHEDULES the change (24 h security delay)", cf.status_code == 200 and cf.json()["status"] == "scheduled" and cf.json()["effective_at"], cf.text)
+check("meanwhile the OLD number still signs in and the new one does not", c.post("/v1/login", json={"phone": old, "password": pw, **L}).status_code == 200
+      and c.post("/v1/login", json={"phone": new, "password": pw, **L}).status_code == 401)
+uid = c.get("/v1/admin/users/search", params={"phone": old}, headers=H).json()["id"]
+sched = [x for x in c.get("/v1/admin/phone-changes", headers=H).json() if x["user_id"] == uid]
+check("the admin sees it scheduled", len(sched) == 1 and sched[0]["status"] == "scheduled")
+check("activate-now needs a written note", c.post(f"/v1/admin/phone-changes/{sched[0]['id']}/activate-now", headers=H, json={"note": "ok"}).status_code == 422)
+an = c.post(f"/v1/admin/phone-changes/{sched[0]['id']}/activate-now", headers=H, json={"note": "Appelee sur son ancien numero, elle confirme"})
+check("after a call the admin makes it effective at once", an.status_code == 200 and an.json()["status"] == "done", an.text)
+check("every session ended (both devices)", c.post("/v1/refresh", json={"refresh_token": b["refresh_token"]}).status_code == 401
+      and c.post("/v1/refresh", json={"refresh_token": a["refresh_token"]}).status_code == 401)
+check("the old number no longer signs in", c.post("/v1/login", json={"phone": old, "password": pw, **L}).status_code == 401)
+rn = c.post("/v1/login", json={"phone": new, "password": pw, **L})
 import base64, json
 tok = rn.json().get("access_token", "..")
 ph = json.loads(base64.urlsafe_b64decode(tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4))).get("ph") if rn.status_code == 200 else None
-check("this device renews and carries the new number", ph == f"tel:+225{new}", ph)
-check("the old number no longer signs in", c.post("/v1/login", json={"phone": old, "password": pw, **L}).status_code == 401)
-check("the new number signs in with the same password", c.post("/v1/login", json={"phone": new, "password": pw, **L}).status_code == 200)
-check("the code cannot be used twice", c.post("/v1/me/phone/confirm", headers=ha, json={"code": code}).status_code == 400)
+check("the new number signs in with the same password and carries the new number", ph == f"tel:+225{new}", ph)
+check("the code cannot be used twice", c.post("/v1/me/phone/confirm", headers=ha, json={"code": code}).status_code in (400, 401))
+
 # after the change: the old number gets a notice, and "this wasn't me" puts it back and freezes
 rows = c.get("/v1/admin/relay-queue", headers=H).json()
 notice = [x for x in rows if x["purpose"] == "phone_changed_notice"][-1]
@@ -78,7 +89,6 @@ nm = c.post(f"/v1/admin/phone-changes/{notice['ref_id']}/not-me", headers=H)
 check("'this wasn't me' reverts the number and freezes the account", nm.status_code == 200 and nm.json() == {"result": "reverted", "frozen": True}, nm.text)
 check("frozen: neither number signs in", c.post("/v1/login", json={"phone": old, "password": pw, **L}).json().get("detail") == "account_blocked"
       and c.post("/v1/login", json={"phone": new, "password": pw, **L}).status_code == 401)
-uid = c.get("/v1/admin/users/search", params={"phone": old}, headers=H).json()["id"]
 check("an admin re-enables after the call", c.post(f"/v1/admin/users/{uid}/enable", headers=H).status_code == 204)
 check("the OLD number signs in again", c.post("/v1/login", json={"phone": old, "password": pw, **L}).status_code == 200)
 print(f"\nresult: {ok} passed, {bad} failed")

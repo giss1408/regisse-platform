@@ -232,7 +232,7 @@ async def relay_send(db: AsyncSession, req: RelayRequest, admin_id: uuid.UUID, i
         pc = await db.get(PhoneChange, req.ref_id) if req.ref_id else None
         if pc is None or pc.old_phone_enc is None:
             raise Conflict("request_closed")
-        if req.purpose == "phone_change_alert" and pc.status != "requested":
+        if req.purpose == "phone_change_alert" and pc.status not in ("requested", "scheduled"):
             raise Conflict("request_closed")  # the change was confirmed, cancelled or replaced: the warning is stale
         masked = kit_phone.mask_phone(cipher().decrypt(pc.new_phone_enc))
         phone = cipher().decrypt(pc.old_phone_enc)  # the warning goes to the number being left
@@ -295,9 +295,37 @@ async def request_phone_change(db: AsyncSession, p, new_raw_phone: str, current_
     return kit_phone.mask_phone(new_phone)
 
 
-async def confirm_phone_change(db: AsyncSession, p, code: str, ip: str | None) -> str:
-    """She typed the code the team sent to the new number. Products that key data by phone move it first (a failure stops everything,
-    nothing changes here); then the number changes, every OTHER session ends, and her current session renews with the new number."""
+async def _apply_phone_change(db: AsyncSession, user: User, pc: PhoneChange, now: datetime, *, keep_sid: str | None, actor: tuple[str, uuid.UUID | None] = ("user", None), note: str | None = None, ip: str | None = None) -> str:
+    """The change takes effect: products that key data by phone move it FIRST (a failure raises 503 with nothing changed here), then the
+    number changes, sessions end (all but `keep_sid`), and a notice is queued for the OLD number. The caller holds the user row lock."""
+    old_phone, new_phone = user_phone(user), cipher().decrypt(pc.new_phone_enc)
+    if await user_by_phone(db, new_phone) is not None:
+        raise Conflict("phone_taken")
+    try:
+        for product in sorted({m.product for m in user.memberships}):
+            await product_hooks.phone_changed(product, old_phone or "", new_phone)
+    except product_hooks.HookFailed:
+        raise ServiceUnavailable("product_unavailable") from None
+    user.phone_enc, user.phone_hash, user.phone_verified_at = pc.new_phone_enc, pc.new_phone_hash, now
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise Conflict("phone_taken") from None
+    pc.status, pc.completed_at = "done", now
+    await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
+    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
+    await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != (keep_sid or "")).values(revoked_at=now))
+    db.add(RelayRequest(user_id=user.id, product=pc.product, purpose="phone_changed_notice", ref_id=pc.id))
+    detail = {"note": note} if note else None
+    await audit(db, actor_type=actor[0], actor_id=actor[1] or user.id, action="user.phone_changed", entity="user", entity_id=user.id, ip=ip, detail=detail)
+    return kit_phone.mask_phone(new_phone)
+
+
+async def confirm_phone_change(db: AsyncSession, p, code: str, ip: str | None) -> dict:
+    """She typed the code the team sent to the new number. With a security delay (default 24 h, `phone_change_delay_hours`) the change is
+    SCHEDULED: the old number keeps working, the old number was warned, and an admin can say "this wasn't me" or, after calling her, make
+    it effective at once. With no delay it takes effect now, every OTHER session ends, and this one renews with the new number."""
     s = get_settings()
     ip_limit(s.activate_ip_limit, "activate", ip)
     user = await db.scalar(select(User).where(User.id == p.user_id).with_for_update())
@@ -317,27 +345,58 @@ async def confirm_phone_change(db: AsyncSession, p, code: str, ip: str | None) -
         raise TooManyRequests("activation_locked") from None
     except kit_codes.NoActiveCode:
         raise BadRequest("no_activation_code") from None
-    old_phone, new_phone = user_phone(user), cipher().decrypt(pc.new_phone_enc)
+    new_phone = cipher().decrypt(pc.new_phone_enc)
     if await user_by_phone(db, new_phone) is not None:
         raise Conflict("phone_taken")
-    try:
-        for product in sorted({m.product for m in user.memberships}):
-            await product_hooks.phone_changed(product, old_phone or "", new_phone)
-    except product_hooks.HookFailed:
-        raise ServiceUnavailable("product_unavailable") from None
-    user.phone_enc, user.phone_hash, user.phone_verified_at = pc.new_phone_enc, pc.new_phone_hash, now
-    try:
-        await db.flush()
-    except IntegrityError:
-        await db.rollback()
-        raise Conflict("phone_taken") from None
-    pc.status, pc.completed_at = "done", now
-    await db.delete(ch)
-    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
-    await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != p.sid).values(revoked_at=now))
-    db.add(RelayRequest(user_id=user.id, product=pc.product, purpose="phone_changed_notice", ref_id=pc.id))
-    await audit(db, actor_type="user", actor_id=user.id, action="user.phone_changed", entity="user", entity_id=user.id, ip=ip)
-    return kit_phone.mask_phone(new_phone)
+    if s.phone_change_delay_hours > 0:
+        pc.status, pc.effective_at = "scheduled", now + timedelta(hours=s.phone_change_delay_hours)
+        await db.delete(ch)
+        await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
+        await audit(db, actor_type="user", actor_id=user.id, action="user.phone_change_scheduled", entity="user", entity_id=user.id, ip=ip)
+        return {"status": "scheduled", "effective_at": pc.effective_at.isoformat() + "Z", "phone_masked": kit_phone.mask_phone(new_phone)}
+    masked = await _apply_phone_change(db, user, pc, now, keep_sid=p.sid, ip=ip)
+    return {"status": "done", "effective_at": None, "phone_masked": masked}
+
+
+async def apply_due_phone_changes(db: AsyncSession, now: datetime | None = None, *, phone: str | None = None) -> dict:
+    """Takes effect every scheduled change whose delay has passed (a cron job, `app.cli apply-phone-changes`), or only the one touching
+    `phone` (called at sign-in, so nobody waits for the job). A product that cannot move its data keeps the change scheduled."""
+    now = now or utcnow()
+    q = select(PhoneChange).where(PhoneChange.status == "scheduled", PhoneChange.effective_at <= now)
+    if phone is not None:
+        ph = hasher().phone(phone)
+        q = q.join(User, User.id == PhoneChange.user_id).where((PhoneChange.new_phone_hash == ph) | (User.phone_hash == ph))
+    out = {"applied": 0, "waiting_for_product": 0, "failed": 0}
+    for pc in (await db.scalars(q.order_by(PhoneChange.id))).all():
+        user = await db.scalar(select(User).where(User.id == pc.user_id).with_for_update())
+        if user is None or user.status != "active":
+            continue  # frozen or erased meanwhile: an admin decides
+        try:
+            await _apply_phone_change(db, user, pc, now, keep_sid=None, actor=("system", None))
+            out["applied"] += 1
+        except ServiceUnavailable:
+            out["waiting_for_product"] += 1
+        except Conflict:
+            pc.status, pc.completed_at = "failed", now  # the new number was taken meanwhile
+            await audit(db, actor_type="system", action="user.phone_change_failed", entity="user", entity_id=user.id, detail={"reason": "phone_taken"})
+            out["failed"] += 1
+    return out
+
+
+async def phone_change_activate_now(db: AsyncSession, pc_id: int, admin_id: uuid.UUID, note: str, ip: str | None) -> str:
+    """An admin called the person on the number she was using and she confirmed: the scheduled change takes effect now, with a written
+    note (who, what was checked). Every session ends; she signs in with the new number."""
+    pc = await db.get(PhoneChange, pc_id)
+    if pc is None:
+        raise NotFound("phone_change_not_found")
+    user = await db.scalar(select(User).where(User.id == pc.user_id).with_for_update())
+    if user is None or user.status != "active":
+        raise Conflict("nothing_to_activate")
+    if pc.status != "scheduled":
+        raise Conflict("nothing_to_activate")
+    if len((note or "").strip()) < 10:
+        raise BadRequest("note_required")
+    return await _apply_phone_change(db, user, pc, utcnow(), keep_sid=None, actor=("admin", admin_id), note=note.strip()[:300], ip=ip)
 
 
 async def phone_change_not_me(db: AsyncSession, pc_id: int, admin_id: uuid.UUID, ip: str | None) -> dict:
@@ -353,11 +412,11 @@ async def phone_change_not_me(db: AsyncSession, pc_id: int, admin_id: uuid.UUID,
         raise NotFound("user_not_found")
     if is_privileged(user):
         raise Forbidden("staff_cannot_change_phone")
-    if pc.status not in ("requested", "done"):
+    if pc.status not in ("requested", "scheduled", "done"):
         raise Conflict("nothing_to_cancel")
     result = "cancelled"
     revert_failed = None
-    if pc.status == "requested":
+    if pc.status in ("requested", "scheduled"):
         pc.status, pc.completed_at = "cancelled", utcnow()
         await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
         await db.execute(update(RelayRequest).where(RelayRequest.ref_id == pc.id, RelayRequest.purpose.in_(["phone_change", "phone_change_alert"]), RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
@@ -433,6 +492,7 @@ async def login(db: AsyncSession, *, raw_phone: str | None = None, raw_email: st
         user = await user_by_email(db, email, lock=True)  # locked: two parallel logins cannot both spend the same authenticator code
     else:
         phone = normalize_phone(raw_phone or "")
+        await apply_due_phone_changes(db, phone=phone)  # a change whose delay passed takes effect now: no one waits for the job
         fail_key = f"login-fail:{hasher().phone(phone)}"
         if not limiter().test(item(s.login_fail_limit), fail_key):
             raise TooManyRequests("login_locked")

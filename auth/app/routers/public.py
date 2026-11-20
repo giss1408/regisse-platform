@@ -179,10 +179,11 @@ async def phone_change_request(data: PhoneChangeIn, request: Request, p: Princip
 
 @router.post("/me/phone/confirm")
 async def phone_change_confirm(data: PhoneConfirmIn, request: Request, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
-    """The code from the new number. Every other session ends; this one keeps working: renew it (POST /v1/refresh) to get the new number."""
-    masked = await accounts.confirm_phone_change(db, p, data.code, client_ip(request))
+    """The code from the new number. By default the change is SCHEDULED for `effective_at` (a security delay; the old number keeps working and was
+    warned). Without a delay it takes effect now: every other session ends and this one renews (POST /v1/refresh) with the new number."""
+    out = await accounts.confirm_phone_change(db, p, data.code, client_ip(request))
     await db.commit()
-    return {"phone_masked": masked}
+    return out
 
 
 @router.get("/me")

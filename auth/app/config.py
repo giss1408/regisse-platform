@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     activate_ip_limit: str = "30/15minute"
     refresh_ip_limit: str = "120/minute"
     reset_request_limit: str = "3/hour"
+    # Security delay between the confirmed code and a number change taking effect (the old number is warned meanwhile). 0 = immediate.
+    phone_change_delay_hours: int = 24
 
     @field_validator("database_url")
     @classmethod

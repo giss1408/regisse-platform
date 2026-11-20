@@ -39,7 +39,7 @@ def phone_change(product: str, display_name: str | None, code: str) -> str:
 def phone_change_alert(product: str, display_name: str | None, new_masked: str) -> str:
     return (
         f"Bonjour {first_name(display_name)} 👋 Quelqu’un a demandé de changer le numéro de ton compte {label(product)} vers {new_masked}.\n\n"
-        "Si c’est toi, ne fais rien. Si ce n’est *pas toi*, réponds-nous ici tout de suite avec « PAS MOI » : nous bloquons la demande et ton compte."
+        "Le changement n’est effectif qu’après un délai de sécurité. Si c’est toi, ne fais rien. Si ce n’est *pas toi*, réponds-nous ici tout de suite avec « PAS MOI » : nous bloquons la demande et ton compte."
     )
 
 

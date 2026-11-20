@@ -1,6 +1,7 @@
 """Number change in auth: password + code sent to the NEW number by the relay admin; products move their data first."""
 
 import jwt
+import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -10,6 +11,12 @@ from app.services import accounts, product_hooks
 from tests.conftest import PASSWORD, admin_headers, code_from_url, make_user
 
 LOGIN = {"password": PASSWORD, "product": "fidelia", "app": "customer"}
+
+
+@pytest.fixture(autouse=True)
+def no_delay(monkeypatch):
+    """The process tests below run without the security delay; the delay has its own tests at the end."""
+    monkeypatch.setattr(get_settings(), "phone_change_delay_hours", 0)
 
 
 async def signed_in(client, phone="0701020304", **user):
@@ -265,3 +272,148 @@ async def test_only_an_admin_can_say_not_me(client):
     _, h = await signed_in(client)
     await _request(client, h)
     assert (await client.post("/v1/admin/phone-changes/1/not-me", headers=h)).status_code == 403
+
+
+# --- the security delay (24 h by default) --------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def delayed(monkeypatch):
+    monkeypatch.setattr(get_settings(), "phone_change_delay_hours", 24)
+
+
+async def _scheduled(client, monkeypatch, moved=None):
+    async def hook(product, old, new):
+        if moved is not None:
+            moved.append((old, new))
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    t, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    code, item = await relay_code(client, boss)
+    r = await client.post("/v1/me/phone/confirm", headers=h, json={"code": code})
+    return t, h, boss, item, r
+
+
+async def _due(hours=25):
+    from datetime import timedelta
+
+    from app import tokens
+    from app.models import PhoneChange
+
+    async with SessionLocal() as db:
+        for pc in (await db.scalars(select(PhoneChange))).all():
+            pc.effective_at = tokens.utcnow() - timedelta(hours=hours - 24)
+        await db.commit()
+
+
+async def test_with_the_delay_the_code_only_schedules_the_change_and_the_old_number_keeps_working(client, monkeypatch, delayed):
+    moved = []
+    t, h, boss, item, r = await _scheduled(client, monkeypatch, moved)
+    assert r.status_code == 200 and r.json()["status"] == "scheduled" and r.json()["effective_at"].endswith("Z")
+    assert moved == []  # nothing moves in the products yet
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 200
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 401
+    assert (await client.post("/v1/refresh", json={"refresh_token": t["refresh_token"]})).status_code == 200
+    rows = (await client.get("/v1/admin/phone-changes", headers=boss)).json()
+    assert [(x["status"], x["new_phone_masked"]) for x in rows] == [("scheduled", "+225 07 •• •• 08")]
+    assert _queue((await client.get("/v1/admin/relay-queue", headers=boss)).json(), "phone_changed_notice") == []
+    # and the warning to the old number is still good to send
+    alert = _queue((await client.get("/v1/admin/relay-queue", headers=boss)).json(), "phone_change_alert")[0]
+    assert (await client.post(f"/v1/admin/relay/{alert['id']}/send", headers=boss)).status_code == 200
+
+
+async def test_when_the_delay_has_passed_the_job_applies_it_and_ends_every_session(client, monkeypatch, delayed):
+    moved = []
+    t, h, boss, item, r = await _scheduled(client, monkeypatch, moved)
+    async with SessionLocal() as db:
+        assert await accounts.apply_due_phone_changes(db) == {"applied": 0, "waiting_for_product": 0, "failed": 0}  # not yet
+    await _due()
+    async with SessionLocal() as db:
+        assert await accounts.apply_due_phone_changes(db) == {"applied": 1, "waiting_for_product": 0, "failed": 0}
+        await db.commit()
+    assert moved == [("+2250701020304", "+2250705060708")]
+    assert (await client.post("/v1/refresh", json={"refresh_token": t["refresh_token"]})).status_code == 401
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 200
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 401
+    assert len(_queue((await client.get("/v1/admin/relay-queue", headers=boss)).json(), "phone_changed_notice")) == 1
+
+
+async def test_signing_in_after_the_delay_applies_it_without_waiting_for_the_job(client, monkeypatch, delayed):
+    await _scheduled(client, monkeypatch)
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 401  # too early
+    await _due()
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 200  # on the new number: it applies, then signs in
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 401
+
+
+async def test_signing_in_with_the_old_number_after_the_delay_also_applies_it(client, monkeypatch, delayed):
+    await _scheduled(client, monkeypatch)
+    await _due()
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 401  # the old number is gone
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 200
+
+
+async def test_a_product_that_is_down_keeps_the_change_scheduled_for_the_next_run(client, monkeypatch, delayed):
+    await _scheduled(client, monkeypatch)
+    state = {"down": True}
+
+    async def hook(product, old, new):
+        if state["down"]:
+            raise product_hooks.HookFailed(product)
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    await _due()
+    async with SessionLocal() as db:
+        assert (await accounts.apply_due_phone_changes(db))["waiting_for_product"] == 1
+        await db.commit()
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 200  # still her number, nothing half done
+    state["down"] = False
+    async with SessionLocal() as db:
+        assert (await accounts.apply_due_phone_changes(db))["applied"] == 1
+        await db.commit()
+
+
+async def test_a_number_taken_during_the_delay_fails_the_change_cleanly(client, monkeypatch, delayed):
+    await _scheduled(client, monkeypatch)
+    await make_user("0705060708", role="customer", product="fidelia")
+    await _due()
+    async with SessionLocal() as db:
+        assert (await accounts.apply_due_phone_changes(db))["failed"] == 1
+        await db.commit()
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 200
+
+
+async def test_an_admin_who_called_her_can_make_it_effective_at_once_with_a_written_note(client, monkeypatch, delayed):
+    moved = []
+    t, h, boss, item, r = await _scheduled(client, monkeypatch, moved)
+    pc_id = item["ref_id"]
+    short = await client.post(f"/v1/admin/phone-changes/{pc_id}/activate-now", headers=boss, json={"note": "ok"})
+    assert short.status_code == 422 and moved == []
+    done = await client.post(f"/v1/admin/phone-changes/{pc_id}/activate-now", headers=boss, json={"note": "Appelée sur son ancien numéro, confirme"})
+    assert done.status_code == 200 and done.json()["status"] == "done"
+    assert moved == [("+2250701020304", "+2250705060708")]
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 200
+    again = await client.post(f"/v1/admin/phone-changes/{pc_id}/activate-now", headers=boss, json={"note": "Appelée sur son ancien numéro, confirme"})
+    assert again.status_code == 409
+    async with SessionLocal() as db:
+        audit = (await db.scalars(select(AuditLog).where(AuditLog.action == "user.phone_changed"))).all()
+        assert audit[-1].actor_type == "admin" and "Appelée" in audit[-1].detail["note"]
+
+
+async def test_only_an_admin_can_activate_now(client, monkeypatch, delayed):
+    t, h, boss, item, r = await _scheduled(client, monkeypatch)
+    assert (await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/activate-now", headers=h, json={"note": "x" * 12})).status_code == 403
+
+
+async def test_not_me_during_the_delay_cancels_it_and_freezes(client, monkeypatch, delayed):
+    t, h, boss, item, r = await _scheduled(client, monkeypatch)
+    out = await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)
+    assert out.json() == {"result": "cancelled", "frozen": True}
+    await _due()
+    async with SessionLocal() as db:
+        assert (await accounts.apply_due_phone_changes(db))["applied"] == 0  # cancelled means cancelled
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).json()["detail"] == "account_blocked"

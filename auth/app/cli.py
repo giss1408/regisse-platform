@@ -205,6 +205,18 @@ async def import_fidelia(apply: bool, refresh: bool = False, do_cutover: bool = 
     print(json.dumps(stats, indent=2))
 
 
+async def apply_phone_changes() -> None:
+    """Cron (every 10 minutes): number changes whose security delay has passed take effect. Prints counts only."""
+    import json
+
+    from app.services import accounts
+
+    async with SessionLocal() as db:
+        out = await accounts.apply_due_phone_changes(db)
+        await db.commit()
+    print(json.dumps(out))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -213,6 +225,7 @@ def main() -> None:
     a.add_argument("--name", required=True)
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
+    sub.add_parser("apply-phone-changes")
     fid = sub.add_parser("import-fidelia")
     fid.add_argument("--apply", action="store_true")
     fid.add_argument("--refresh", action="store_true")
@@ -231,6 +244,8 @@ def main() -> None:
         asyncio.run(create_admin(args.phone, args.name, args.role))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
+    elif args.cmd == "apply-phone-changes":
+        asyncio.run(apply_phone_changes())
     elif args.cmd == "import-fidelia":
         asyncio.run(import_fidelia(args.apply, args.refresh, args.cutover))
     elif args.cmd == "import-flariane-admins":
