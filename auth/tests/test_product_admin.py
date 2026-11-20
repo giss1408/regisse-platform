@@ -130,3 +130,95 @@ async def test_pending_means_open_or_sent_and_a_temporary_password_needs_a_recen
     assert (await client.post(f"/v1/admin/relay/{by['password_reset']['id']}/send", headers=team)).status_code == 200
     again = {r["purpose"] for r in (await client.get("/v1/admin/relay-queue", params={"status": "pending"}, headers=team)).json()}
     assert again == {"activation"}  # sent once and waiting for the code: still listed so it can be re-sent; the reset is done
+
+
+# --- frozen accounts: list and give back --------------------------------------------------------------------------------
+
+
+async def _freeze_via_not_me(client, phone, new, monkeypatch):
+    async def hook(*a):
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    h = await customer(client, phone, FID)
+    await request_change(client, h, new)
+    boss = await admin_headers("super_admin", "0700000002")
+    ref = [x for x in (await client.get("/v1/admin/relay-queue", headers=boss)).json() if x["purpose"] == "phone_change"][-1]["ref_id"]
+    assert (await client.post(f"/v1/admin/phone-changes/{ref}/not-me", headers=boss)).status_code == 200
+    return h
+
+
+async def test_frozen_users_are_listed_for_their_product_with_the_reason(client, monkeypatch):
+    await _freeze_via_not_me(client, "0701010101", "0711111111", monkeypatch)
+    other = await make_user("0702020202", role="customer", product="flariane")
+    boss = await admin_headers("super_admin", "0700000003")
+    async with SessionLocal() as db:
+        u = await db.get(type(other), other.id)
+        u.status = "disabled"
+        erased = await make_user("0704040404", role="customer", product="fidelia")
+        e = await db.get(type(erased), erased.id)
+        e.status, e.phone_enc, e.phone_hash = "disabled", None, None
+        await db.commit()
+    team = await product_admin("fidelia")
+    mine = (await client.get("/v1/admin/frozen-users", headers=team)).json()
+    assert len(mine) == 1 and mine[0]["products"] == ["fidelia"] and mine[0]["reason"] == "not_me" and mine[0]["phone_masked"] == "+225 07 •• •• 01"
+    everyone = (await client.get("/v1/admin/frozen-users", headers=boss)).json()
+    assert {tuple(x["products"]) for x in everyone} == {("fidelia",), ("flariane",)}  # the erased account (no number) is never listed
+    assert any(x["reason"] == "unknown" for x in everyone)  # disabled without an audit row here: said honestly
+
+
+async def test_a_product_admin_gives_an_account_back_with_a_note_and_a_recent_proof(client, monkeypatch):
+    await _freeze_via_not_me(client, "0701010101", "0711111111", monkeypatch)
+    team = await product_admin("fidelia")
+    uid = (await client.get("/v1/admin/frozen-users", headers=team)).json()[0]["id"]
+    stale = await product_admin("fidelia", phone="0700000078", age=900)
+    assert (await client.post(f"/v1/admin/users/{uid}/enable", headers=stale, json={"note": "Appelé, c'est bien lui"})).json()["detail"] == "step_up_required"
+    assert (await client.post(f"/v1/admin/users/{uid}/enable", headers=team)).json()["detail"] == "note_required"
+    assert (await client.post(f"/v1/admin/users/{uid}/enable", headers=team, json={"note": "court"})).json()["detail"] == "note_required"
+    assert (await client.post("/v1/login", json={"phone": "0701010101", **FID})).json()["detail"] == "account_blocked"
+    ok = await client.post(f"/v1/admin/users/{uid}/enable", headers=team, json={"note": "Appelé sur l'ancien numéro, c'est bien lui"})
+    assert ok.status_code == 204
+    assert (await client.post("/v1/login", json={"phone": "0701010101", **FID})).status_code == 200
+    assert (await client.get("/v1/admin/frozen-users", headers=team)).json() == []
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    async with SessionLocal() as db:
+        row = (await db.scalars(select(AuditLog).where(AuditLog.action == "user.enabled"))).all()[-1]
+        assert "bien lui" in row.detail["note"]
+
+
+async def test_a_product_admin_cannot_enable_other_products_people_auth_staff_or_erased_accounts(client):
+    team = await product_admin("fidelia")
+    note = {"note": "Appelé, tout est vérifié ici"}
+    flr = await make_user("0702020202", role="customer", product="flariane")
+    staff = await make_user("0703030303", role="admin", product="auth")
+    erased = await make_user("0704040404", role="customer", product="fidelia")
+    async with SessionLocal() as db:
+        for u in (flr, staff, erased):
+            row = await db.get(type(u), u.id)
+            row.status = "disabled"
+        e = await db.get(type(erased), erased.id)
+        e.phone_enc, e.phone_hash = None, None
+        await db.commit()
+    assert (await client.post(f"/v1/admin/users/{flr.id}/enable", headers=team, json=note)).status_code == 404
+    assert (await client.post(f"/v1/admin/users/{staff.id}/enable", headers=team, json=note)).status_code == 404  # not in her product: it does not exist for her
+    assert (await client.post(f"/v1/admin/users/{erased.id}/enable", headers=team, json=note)).status_code == 409
+    # a fidelia admin (not super) cannot give back another fidelia staff account; a fidelia super admin can
+    agent = await make_user("0705050505", role="agent", product="fidelia")
+    async with SessionLocal() as db:
+        (await db.get(type(agent), agent.id)).status = "disabled"
+        await db.commit()
+    assert (await client.post(f"/v1/admin/users/{agent.id}/enable", headers=team, json=note)).json()["detail"] == "super_admin_only"
+    boss = await product_admin("fidelia", role="super_admin", phone="0700000090")
+    assert (await client.post(f"/v1/admin/users/{agent.id}/enable", headers=boss, json=note)).status_code == 204
+
+
+async def test_user_search_by_a_product_admin_stays_in_her_product_and_by_phone(client):
+    await make_user("0701010101", role="customer", product="fidelia")
+    await make_user("0702020202", role="customer", product="flariane")
+    team = await product_admin("fidelia")
+    assert (await client.get("/v1/admin/users/search", params={"phone": "0701010101"}, headers=team)).status_code == 200
+    assert (await client.get("/v1/admin/users/search", params={"phone": "0702020202"}, headers=team)).status_code == 404
+    assert (await client.get("/v1/admin/users/search", params={"email": "x@y.fr"}, headers=team)).status_code == 403

@@ -74,11 +74,13 @@ async def relay_reject(request_id: int, request: Request, admin: Principal = Dep
 
 
 @router.get("/users/search")
-async def search_user(phone: str | None = None, email: str | None = None, _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+async def search_user(phone: str | None = None, email: str | None = None, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> dict:
     if bool(phone) == bool(email):
         raise BadRequest("phone_or_email")
+    if admin.scope and not phone:
+        raise Forbidden("auth_admin_only")  # product admins look people up by phone, in their own product
     user = await accounts.user_by_phone(db, accounts.normalize_phone(phone)) if phone else await accounts.user_by_email(db, accounts.normalize_email(email or ""))
-    if user is None:
+    if user is None or (admin.scope and not any(m.product == admin.scope for m in user.memberships)):
         raise NotFound("user_not_found")
     return {"id": str(user.id), "display_name": user.display_name, "status": user.status,
             "memberships": [{"product": m.product, "role": m.role} for m in user.memberships]}
@@ -95,6 +97,44 @@ def _guard_staff_target(admin: Principal, user: User) -> None:
     """Only a super admin acts on staff accounts; an admin cannot touch another admin or a super admin."""
     if admin.role != "super_admin" and any(m.product == "auth" and m.role in STAFF_ROLES for m in user.memberships):
         raise Forbidden("super_admin_only")
+
+
+def _guard_scoped_target(admin: Principal, user: User) -> None:
+    """Acting on a user: an auth back-office admin follows `_guard_staff_target`; a product admin only touches people of her own product, never
+    auth staff, and only a product super admin touches that product's staff (agents, admins)."""
+    if not admin.scope:
+        _guard_staff_target(admin, user)
+        return
+    if not any(m.product == admin.scope for m in user.memberships):
+        raise NotFound("user_not_found")
+    if any(m.product == "auth" for m in user.memberships):
+        raise Forbidden("auth_admin_only")
+    if accounts.is_privileged(user) and admin.role != "super_admin":
+        raise Forbidden("super_admin_only")
+
+
+class EnableIn(BaseModel):
+    note: str | None = Field(default=None, max_length=300)  # who was called and what was checked: required (10+) for a product's own admins
+
+
+@router.get("/frozen-users")
+async def frozen_users(admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> list[dict]:
+    """Accounts that are switched off (frozen after "this wasn't me", or disabled by an admin) and can still be given back: erased accounts
+    (no number any more) are not listed. For each, why and when, from the audit trail."""
+    from app.models import AuditLog, Membership
+
+    q = select(User).where(User.status == "disabled", User.phone_enc.is_not(None)).order_by(User.created_at.desc())
+    if admin.scope:
+        q = q.where(User.id.in_(select(Membership.user_id).where(Membership.product == admin.scope)))
+    out = []
+    for u in (await db.scalars(q.limit(200))).all():
+        last = await db.scalar(select(AuditLog).where(AuditLog.entity == "user", AuditLog.entity_id == str(u.id),
+                                                      AuditLog.action.in_(["user.phone_change_not_me", "user.disabled"])).order_by(AuditLog.id.desc()).limit(1))
+        out.append({"id": str(u.id), "display_name": u.display_name, "phone_masked": accounts.kit_phone.mask_phone(accounts.user_phone(u) or ""),
+                    "products": sorted({m.product for m in u.memberships}),
+                    "reason": {"user.phone_change_not_me": "not_me", "user.disabled": "disabled"}.get(last.action if last else "", "unknown"),
+                    "since": last.at.isoformat() + "Z" if last else None})
+    return out
 
 
 class ActivateNowIn(BaseModel):
@@ -172,12 +212,21 @@ async def disable_user(user_id: uuid.UUID, request: Request, admin: Principal = 
 
 
 @router.post("/users/{user_id}/enable", status_code=204)
-async def enable_user(user_id: uuid.UUID, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> None:
+async def enable_user(user_id: uuid.UUID, request: Request, data: EnableIn | None = None, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> None:
+    """Gives a frozen or disabled account back (after calling the person). A product's own admin needs a recent proof and a written note
+    (10+ characters, kept in the audit); an erased account (no number left) cannot be re-enabled."""
     user = await _user(db, user_id)
-    _guard_staff_target(admin, user)
+    _guard_scoped_target(admin, user)
+    note = (data.note or "").strip() if data else ""
+    if admin.scope:
+        require_fresh(admin)
+        if len(note) < 10:
+            raise BadRequest("note_required")
     if user.status == "disabled":
+        if user.phone_enc is None:
+            raise Conflict("erased_account")
         user.status = "active"
-    await audit(db, actor_type="admin", actor_id=admin.user_id, action="user.enabled", entity="user", entity_id=user.id, ip=client_ip(request))
+    await audit(db, actor_type="admin", actor_id=admin.user_id, action="user.enabled", entity="user", entity_id=user.id, ip=client_ip(request), detail={"note": note} if note else None)
     await db.commit()
 
 
