@@ -28,7 +28,8 @@ pw=$(openssl rand -hex 24)
 rpw=$(openssl rand -hex 24)
 
 # Redis DB index: next free number (0 is reserved for infra checks)
-idx=$(( $(find secrets -maxdepth 1 -name '*.env' | wc -l | tr -d ' ') + 1 ))
+# (the next number after the highest one a product already uses: counting files breaks as soon as other files, like hooks.env, live in secrets/)
+idx=$(( $(cat secrets/*.env 2>/dev/null | grep -E '^REDIS_URL=' | sed -E 's#.*/([0-9]+)$#\1#' | sort -n | tail -1 | grep -E '^[0-9]+$' || echo 0) + 1 ))
 [ "$idx" -le 15 ] || { echo "no free Redis DB index (max 15 products); use key prefixes or a second Redis"; exit 1; }
 
 PSQL -d postgres <<SQL

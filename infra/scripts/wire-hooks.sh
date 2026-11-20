@@ -11,8 +11,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KEYS_FILE="${KEYS_FILE:-$ROOT/infra/secrets/hooks.env}"
 AUTH_ENV="${AUTH_ENV:-$ROOT/auth/.env.platform}"
 FLARIANE_ENV="${FLARIANE_ENV:-$ROOT/../flariane/.env.platform}"
-# fidelia is not deployed on the platform yet: its env lives with the other product secrets, outside any repository (the file new-product.sh will use)
-FIDELIA_ENV="${FIDELIA_ENV:-$ROOT/infra/secrets/fidelia.env}"
+# fidelia is not deployed on the platform yet: its hook key lives with the other product secrets, outside any repository, in its own file (new-product.sh owns fidelia.env; make-product-env.sh merges both)
+FIDELIA_ENV="${FIDELIA_ENV:-$ROOT/infra/secrets/fidelia.hooks.env}"
 HOOK_URL_FIDELIA="${HOOK_URL_FIDELIA:-http://fidelia-web:8000/api/internal/phone-changed}"
 HOOK_URL_FLARIANE="${HOOK_URL_FLARIANE:-http://flariane-web:8000/internal/phone-changed}"
 ROTATE=""; RESTART=0; CHECK=0; PRODUCTS="fidelia,flariane"

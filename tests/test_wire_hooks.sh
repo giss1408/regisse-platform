@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/flr" "$T/fid"
 # the default fidelia env is outside every repository
-bash -c 'grep -q "infra/secrets/fidelia.env" "$0"' "$ROOT/infra/scripts/wire-hooks.sh" && echo "  PASS  the default fidelia env file lives in infra/secrets, not in a repository" || echo "  FAIL  default fidelia env"; echo "OTHER=keep-me" > "$T/auth.env"; echo "FLR_X=1" > "$T/flr/.env.platform"
+bash -c 'grep -q "infra/secrets/fidelia.hooks.env" "$0"' "$ROOT/infra/scripts/wire-hooks.sh" && echo "  PASS  the default fidelia hook-key file lives in infra/secrets, not in a repository, and is not new-product.sh's fidelia.env" || echo "  FAIL  default fidelia env"; echo "OTHER=keep-me" > "$T/auth.env"; echo "FLR_X=1" > "$T/flr/.env.platform"
 export KEYS_FILE="$T/hooks.env" AUTH_ENV="$T/auth.env" FLARIANE_ENV="$T/flr/.env.platform" FIDELIA_ENV="$T/fid/.env.platform"
 pass=0; failn=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }; bad(){ echo "  FAIL  $1"; failn=$((failn+1)); }
