@@ -81,7 +81,7 @@ async def test_the_code_goes_to_the_new_number_and_a_wrong_code_changes_nothing(
     _, h = await signed_in(client)
     boss = await admin_headers("super_admin", "0700000002")
     await client.post("/v1/me/phone/request", headers=h, json={"new_phone": "0705060708", "current_password": PASSWORD})
-    q = (await client.get("/v1/admin/relay-queue", headers=boss)).json()
+    q = [x for x in (await client.get("/v1/admin/relay-queue", headers=boss)).json() if x["purpose"] == "phone_change"]
     url = (await client.post(f"/v1/admin/relay/{q[-1]['id']}/send", headers=boss)).json()["url"]
     assert "2250705060708" in url and "2250701020304" not in url  # the wa.me link targets the NEW number
     bad = await client.post("/v1/me/phone/confirm", headers=h, json={"code": "000000"})
@@ -145,3 +145,123 @@ async def test_the_new_number_is_taken_in_the_meantime(client, monkeypatch):
     assert r.status_code == 409 and r.json()["detail"] == "phone_taken"
     async with SessionLocal() as db:
         assert accounts.user_phone(await accounts.user_by_phone(db, "+2250701020304")) == "+2250701020304"
+
+
+# --- "this wasn't me": the old number is warned, an admin cancels or puts the number back ---------------------------------
+
+
+def _queue(rows, purpose):
+    return [x for x in rows if x["purpose"] == purpose]
+
+
+async def _request(client, h, new="0705060708"):
+    return await client.post("/v1/me/phone/request", headers=h, json={"new_phone": new, "current_password": PASSWORD})
+
+
+async def test_the_old_number_is_warned_the_moment_a_change_is_requested(client):
+    _, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    alert = _queue((await client.get("/v1/admin/relay-queue", headers=boss)).json(), "phone_change_alert")[0]
+    assert alert["ref_id"] is not None and alert["product"] == "fidelia"
+    url = (await client.post(f"/v1/admin/relay/{alert['id']}/send", headers=boss)).json()["url"]
+    assert "2250701020304" in url and "2250705060708" not in url  # to the number being left
+    from urllib.parse import parse_qs, urlsplit
+
+    text = parse_qs(urlsplit(url).query)["text"][0]
+    assert "PAS MOI" in text and "+225 07 •• •• 08" in text and "0705060708" not in text  # the new number is masked, no code in it
+    assert (await client.post(f"/v1/admin/relay/{alert['id']}/send", headers=boss)).status_code == 409  # sent once
+
+
+async def test_a_confirmed_change_leaves_a_notice_for_the_old_number_and_the_stale_warning_is_refused(client, monkeypatch):
+    async def hook(*a):
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    _, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    code, _ = await relay_code(client, boss)
+    assert (await client.post("/v1/me/phone/confirm", headers=h, json={"code": code})).status_code == 200
+    rows = (await client.get("/v1/admin/relay-queue", headers=boss)).json()
+    notice = _queue(rows, "phone_changed_notice")[0]
+    url = (await client.post(f"/v1/admin/relay/{notice['id']}/send", headers=boss)).json()["url"]
+    assert "2250701020304" in url  # to the OLD number, although the account's number is now the new one
+    stale = _queue(rows, "phone_change_alert")[0]
+    assert (await client.post(f"/v1/admin/relay/{stale['id']}/send", headers=boss)).status_code == 409
+
+
+async def test_not_me_on_a_pending_request_cancels_it_freezes_the_account_and_kills_the_code(client, monkeypatch):
+    async def hook(*a):
+        raise AssertionError("nothing moved, nothing to move back")
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    t, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    code, item = await relay_code(client, boss)
+    r = await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)
+    assert r.json() == {"result": "cancelled", "frozen": True}
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).json()["detail"] == "account_blocked"
+    assert (await client.post("/v1/refresh", json={"refresh_token": t["refresh_token"]})).status_code == 401
+    # an admin calls the person, then re-enables: the number is still the old one and the code is dead
+    async with SessionLocal() as db:
+        uid = str((await accounts.user_by_phone(db, "+2250701020304")).id)
+    assert (await client.post(f"/v1/admin/users/{uid}/enable", headers=boss)).status_code == 204
+    again = (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).json()
+    assert (await client.post("/v1/me/phone/confirm", headers={"Authorization": f"Bearer {again['access_token']}"}, json={"code": code})).status_code == 400
+    assert (await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)).status_code == 409  # already handled
+
+
+async def test_not_me_after_the_change_puts_the_old_number_back_through_the_products(client, monkeypatch):
+    moved = []
+
+    async def hook(product, old, new):
+        moved.append((old, new))
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    _, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    code, item = await relay_code(client, boss)
+    await client.post("/v1/me/phone/confirm", headers=h, json={"code": code})
+    r = await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)
+    assert r.json() == {"result": "reverted", "frozen": True}
+    assert moved == [("+2250701020304", "+2250705060708"), ("+2250705060708", "+2250701020304")]
+    async with SessionLocal() as db:
+        user = await accounts.user_by_phone(db, "+2250701020304")
+        assert user is not None and user.status == "disabled"
+        assert await accounts.user_by_phone(db, "+2250705060708") is None
+    assert (await client.post(f"/v1/admin/users/{user.id}/enable", headers=boss)).status_code == 204
+    assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).status_code == 200
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 401
+
+
+async def test_if_a_product_cannot_move_back_the_freeze_still_holds_and_the_action_can_be_repeated(client, monkeypatch):
+    state = {"down": False}
+
+    async def hook(product, old, new):
+        if state["down"]:
+            raise product_hooks.HookFailed(product)
+        return True
+
+    monkeypatch.setattr(product_hooks, "phone_changed", hook)
+    _, h = await signed_in(client)
+    boss = await admin_headers("super_admin", "0700000002")
+    await _request(client, h)
+    code, item = await relay_code(client, boss)
+    await client.post("/v1/me/phone/confirm", headers=h, json={"code": code})
+    state["down"] = True
+    r = await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)
+    assert r.status_code == 503
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).json()["detail"] == "account_blocked"  # frozen all the same
+    state["down"] = False
+    r = await client.post(f"/v1/admin/phone-changes/{item['ref_id']}/not-me", headers=boss)
+    assert r.json()["result"] == "reverted"
+
+
+async def test_only_an_admin_can_say_not_me(client):
+    _, h = await signed_in(client)
+    await _request(client, h)
+    assert (await client.post("/v1/admin/phone-changes/1/not-me", headers=h)).status_code == 403

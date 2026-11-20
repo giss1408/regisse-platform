@@ -228,6 +228,16 @@ async def relay_send(db: AsyncSession, req: RelayRequest, admin_id: uuid.UUID, i
         text = messages.phone_change(req.product, user.display_name, code)
         req.status = "sent"
         phone = new_phone  # the code goes to the NEW number: that is what proves it is hers
+    elif req.purpose in ("phone_change_alert", "phone_changed_notice"):
+        pc = await db.get(PhoneChange, req.ref_id) if req.ref_id else None
+        if pc is None or pc.old_phone_enc is None:
+            raise Conflict("request_closed")
+        if req.purpose == "phone_change_alert" and pc.status != "requested":
+            raise Conflict("request_closed")  # the change was confirmed, cancelled or replaced: the warning is stale
+        masked = kit_phone.mask_phone(cipher().decrypt(pc.new_phone_enc))
+        phone = cipher().decrypt(pc.old_phone_enc)  # the warning goes to the number being left
+        text = (messages.phone_change_alert if req.purpose == "phone_change_alert" else messages.phone_changed_notice)(req.product, user.display_name, masked)
+        req.status = "done"
     else:
         raise BadRequest("unknown_purpose")
     req.handled_by, req.handled_at = admin_id, now
@@ -272,10 +282,15 @@ async def request_phone_change(db: AsyncSession, p, new_raw_phone: str, current_
     if await user_by_phone(db, new_phone) is not None:
         raise Conflict("phone_taken")  # she is signed in and proved her password: telling her costs nothing
     await db.execute(update(PhoneChange).where(PhoneChange.user_id == user.id, PhoneChange.status == "requested").values(status="replaced"))
-    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
+    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose.in_(["phone_change", "phone_change_alert"]), RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
     await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
-    db.add(PhoneChange(user_id=user.id, product=p.product, new_phone_enc=cipher().encrypt(new_phone), new_phone_hash=hasher().phone(new_phone)))
-    db.add(RelayRequest(user_id=user.id, product=p.product, purpose="phone_change"))
+    pc = PhoneChange(user_id=user.id, product=p.product, new_phone_enc=cipher().encrypt(new_phone), new_phone_hash=hasher().phone(new_phone),
+                     old_phone_enc=user.phone_enc)
+    db.add(pc)
+    await db.flush()
+    db.add(RelayRequest(user_id=user.id, product=p.product, purpose="phone_change", ref_id=pc.id))
+    # the OLD number is warned too: whoever holds the account, the person behind it may not be the one asking
+    db.add(RelayRequest(user_id=user.id, product=p.product, purpose="phone_change_alert", ref_id=pc.id))
     await audit(db, actor_type="user", actor_id=user.id, action="user.phone_change_requested", entity="user", entity_id=user.id, ip=ip)
     return kit_phone.mask_phone(new_phone)
 
@@ -320,8 +335,52 @@ async def confirm_phone_change(db: AsyncSession, p, code: str, ip: str | None) -
     await db.delete(ch)
     await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
     await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != p.sid).values(revoked_at=now))
+    db.add(RelayRequest(user_id=user.id, product=pc.product, purpose="phone_changed_notice", ref_id=pc.id))
     await audit(db, actor_type="user", actor_id=user.id, action="user.phone_changed", entity="user", entity_id=user.id, ip=ip)
     return kit_phone.mask_phone(new_phone)
+
+
+async def phone_change_not_me(db: AsyncSession, pc_id: int, admin_id: uuid.UUID, ip: str | None) -> dict:
+    """The person behind the old number says "this wasn't me" (an admin records it after her WhatsApp reply or a call). A pending request
+    is cancelled; a confirmed change is put back (products move their data back first). Either way the account is frozen and every session
+    ends: an admin calls the person and re-enables it. If a product cannot move its data back the freeze still holds and the answer is a 503
+    to repeat."""
+    pc = await db.get(PhoneChange, pc_id)
+    if pc is None:
+        raise NotFound("phone_change_not_found")
+    user = await db.scalar(select(User).where(User.id == pc.user_id).with_for_update())
+    if user is None:
+        raise NotFound("user_not_found")
+    if is_privileged(user):
+        raise Forbidden("staff_cannot_change_phone")
+    if pc.status not in ("requested", "done"):
+        raise Conflict("nothing_to_cancel")
+    result = "cancelled"
+    revert_failed = None
+    if pc.status == "requested":
+        pc.status, pc.completed_at = "cancelled", utcnow()
+        await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
+        await db.execute(update(RelayRequest).where(RelayRequest.ref_id == pc.id, RelayRequest.purpose.in_(["phone_change", "phone_change_alert"]), RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
+    else:
+        current, back = user_phone(user), cipher().decrypt(pc.old_phone_enc)
+        if await user_by_phone(db, back) is not None:
+            raise Conflict("old_phone_taken")  # someone took the old number meanwhile: an admin sorts it out by hand
+        try:
+            for product in sorted({m.product for m in user.memberships}):
+                await product_hooks.phone_changed(product, current or "", back)
+        except product_hooks.HookFailed as e:
+            revert_failed = e.product
+        if revert_failed is None:
+            user.phone_enc, user.phone_hash = pc.old_phone_enc, hasher().phone(back)
+            pc.status, pc.completed_at = "reverted", utcnow()
+            result = "reverted"
+    user.status = "disabled"
+    await revoke_all_sessions(db, user.id)
+    await audit(db, actor_type="admin", actor_id=admin_id, action="user.phone_change_not_me", entity="user", entity_id=user.id, ip=ip, detail={"result": result if revert_failed is None else "revert_pending"})
+    if revert_failed is not None:
+        await db.commit()  # the freeze must hold even though the product could not move its data back yet
+        raise ServiceUnavailable("product_unavailable")
+    return {"result": result, "frozen": True}
 
 
 async def request_password_reset(db: AsyncSession, *, raw_phone: str, product: str, ip: str | None) -> None:

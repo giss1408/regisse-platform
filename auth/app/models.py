@@ -105,7 +105,8 @@ class PhoneChange(Base):
     product: Mapped[str] = mapped_column(String(32))  # the product she asked from
     new_phone_enc: Mapped[bytes] = mapped_column(LargeBinary)
     new_phone_hash: Mapped[str] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(12), default="requested")  # requested | done | replaced | failed
+    old_phone_enc: Mapped[bytes | None] = mapped_column(LargeBinary)  # to warn the old number, and to put it back on "this wasn't me"
+    status: Mapped[str] = mapped_column(String(12), default="requested")  # requested | done | replaced | cancelled | reverted
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     completed_at: Mapped[datetime | None] = _ts()
 
@@ -118,7 +119,8 @@ class RelayRequest(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     product: Mapped[str] = mapped_column(String(32))
-    purpose: Mapped[str] = mapped_column(String(24))  # activation | password_reset | phone_change
+    purpose: Mapped[str] = mapped_column(String(24))  # activation | password_reset | phone_change | phone_change_alert | phone_changed_notice
+    ref_id: Mapped[int | None] = mapped_column(Integer)  # phone_changes.id for the phone_* purposes
     status: Mapped[str] = mapped_column(String(12), default="open")  # open | sent | rejected | done
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     handled_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

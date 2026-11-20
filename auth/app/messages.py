@@ -34,3 +34,17 @@ def phone_change(product: str, display_name: str | None, code: str) -> str:
         f"Saisis-le dans l’app {label(product)} pour confirmer ce nouveau numéro. "
         "Si tu n’as pas fait cette demande, ne le donne à personne et réponds-nous ici."
     )
+
+
+def phone_change_alert(product: str, display_name: str | None, new_masked: str) -> str:
+    return (
+        f"Bonjour {first_name(display_name)} 👋 Quelqu’un a demandé de changer le numéro de ton compte {label(product)} vers {new_masked}.\n\n"
+        "Si c’est toi, ne fais rien. Si ce n’est *pas toi*, réponds-nous ici tout de suite avec « PAS MOI » : nous bloquons la demande et ton compte."
+    )
+
+
+def phone_changed_notice(product: str, display_name: str | None, new_masked: str) -> str:
+    return (
+        f"Bonjour {first_name(display_name)} 👋 Ton compte {label(product)} est maintenant lié au numéro {new_masked}.\n\n"
+        "Si ce n’est *pas toi*, réponds-nous ici tout de suite avec « PAS MOI » : nous remettons ton ancien numéro et bloquons le compte."
+    )

@@ -22,6 +22,7 @@ STAFF_ROLES = {"super_admin", "admin"}
 
 class QueueItem(BaseModel):
     id: int
+    ref_id: int | None = None
     purpose: str
     product: str
     status: str
@@ -39,7 +40,7 @@ async def relay_queue(status: Literal["open", "sent", "all"] = "open", _: Princi
     for r in (await db.scalars(q.limit(200))).all():
         u = await db.get(User, r.user_id)
         phone = accounts.user_phone(u) if u else None
-        out.append(QueueItem(id=r.id, purpose=r.purpose, product=r.product, status=r.status, display_name=u.display_name if u else None,
+        out.append(QueueItem(id=r.id, ref_id=r.ref_id, purpose=r.purpose, product=r.product, status=r.status, display_name=u.display_name if u else None,
                              phone_masked=accounts.kit_phone.mask_phone(phone) if phone else None, created_at=r.created_at.isoformat()))
     return out
 
@@ -87,6 +88,15 @@ def _guard_staff_target(admin: Principal, user: User) -> None:
     """Only a super admin acts on staff accounts; an admin cannot touch another admin or a super admin."""
     if admin.role != "super_admin" and any(m.product == "auth" and m.role in STAFF_ROLES for m in user.memberships):
         raise Forbidden("super_admin_only")
+
+
+@router.post("/phone-changes/{change_id}/not-me")
+async def phone_change_not_me(change_id: int, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+    """"This wasn't me" on a number change (reported by WhatsApp reply or a call): cancels a pending request or puts a confirmed change back,
+    freezes the account and ends its sessions. Re-enable it (`/users/{id}/enable`) after calling the person."""
+    out = await accounts.phone_change_not_me(db, change_id, admin.user_id, client_ip(request))
+    await db.commit()
+    return out
 
 
 @router.post("/users/{user_id}/disable", status_code=204)
