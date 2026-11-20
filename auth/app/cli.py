@@ -226,6 +226,8 @@ def main() -> None:
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
     sub.add_parser("apply-phone-changes")
+    sub.add_parser("run-scheduler")
+    sub.add_parser("scheduler-healthy")
     fid = sub.add_parser("import-fidelia")
     fid.add_argument("--apply", action="store_true")
     fid.add_argument("--refresh", action="store_true")
@@ -244,6 +246,17 @@ def main() -> None:
         asyncio.run(create_admin(args.phone, args.name, args.role))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
+    elif args.cmd == "run-scheduler":
+        import logging
+
+        from app import scheduler
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        asyncio.run(scheduler.serve())
+    elif args.cmd == "scheduler-healthy":
+        from app import scheduler
+
+        raise SystemExit(0 if scheduler.healthy() else 1)
     elif args.cmd == "apply-phone-changes":
         asyncio.run(apply_phone_changes())
     elif args.cmd == "import-fidelia":

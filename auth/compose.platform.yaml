@@ -21,6 +21,26 @@ services:
       retries: 5
       start_period: 40s
 
+  # Periodic jobs (number changes whose security delay passed take effect). Same image and env as web; no port, no Caddy route.
+  scheduler:
+    image: auth-backend:local
+    container_name: auth-scheduler
+    env_file: .env.platform
+    command: ["python", "-m", "app.cli", "run-scheduler"]
+    restart: unless-stopped
+    networks: [infra_net]
+    mem_limit: 192m
+    cpus: 0.25
+    depends_on:
+      web: {condition: service_healthy}   # web applies the migrations first
+    healthcheck:
+      # a tiny check that imports nothing of the app (the app import alone is slow under this container's CPU limit): the loop ticked within 3 intervals
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time()-int(open(os.environ.get('AUTH_SCHEDULER_HEARTBEAT','/tmp/auth-scheduler-heartbeat')).read())<3*int(os.environ.get('AUTH_SCHEDULER_INTERVAL_SECONDS','600')) else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
 networks:
   infra_net:
     external: true

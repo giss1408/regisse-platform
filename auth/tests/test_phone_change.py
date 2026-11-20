@@ -419,3 +419,33 @@ async def test_not_me_during_the_delay_cancels_it_and_freezes(client, monkeypatc
     async with SessionLocal() as db:
         assert (await accounts.apply_due_phone_changes(db))["applied"] == 0  # cancelled means cancelled
     assert (await client.post("/v1/login", json={"phone": "0701020304", **LOGIN})).json()["detail"] == "account_blocked"
+
+
+# --- the scheduler loop --------------------------------------------------------------------------------------------------
+
+
+async def test_the_scheduler_applies_due_changes_survives_failures_and_reports_its_heartbeat(client, monkeypatch, delayed, tmp_path):
+    from app import scheduler
+
+    monkeypatch.setattr(scheduler, "HEARTBEAT", tmp_path / "hb")
+    assert scheduler.healthy() is False  # never ticked
+    await _scheduled(client, monkeypatch)
+    await _due()
+    sleeps = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    assert await scheduler.serve(iterations=2, sleep=no_sleep) == 0
+    assert sleeps == [scheduler.interval()]  # sleeps between ticks, not after the last
+    assert (await client.post("/v1/login", json={"phone": "0705060708", **LOGIN})).status_code == 200  # the change took effect
+    assert scheduler.healthy() is True
+    # a failing tick is logged, counted, and does not stop the loop
+    async def boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(scheduler, "tick", boom)
+    assert await scheduler.serve(iterations=3, sleep=no_sleep) == 3
+    assert scheduler.healthy() is True  # alive although failing: the logs say why
+    (tmp_path / "hb").write_text("1")
+    assert scheduler.healthy() is False  # a stale heartbeat means a dead loop
