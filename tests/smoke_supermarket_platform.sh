@@ -27,12 +27,12 @@ KEYS=$(docker compose exec -T redis sh -c "redis-cli --no-auth-warning -a \"\$RE
 
 # --- the auth service, with the product's own service key
 ST=$(aut -X POST -H "X-Service-Key: $SVC" -H 'content-type: application/json' -d "{\"phone\":\"$PH\",\"display_name\":\"Caissière Smoke\",\"role\":\"retailer_staff\"}" $B/v1/service/staff)
-UID_=$(echo "$ST" | J "['user_id']"); TMP=$(echo "$ST" | J "['temporary_password']")
-[ -n "$TMP" ] && ok "the product's backend adds a retailer's staff member through auth (temporary password returned once)" || bad "create staff" "$ST"
-L=$(aut -X POST -H 'content-type: application/json' -d "{\"phone\":\"$PH\",\"password\":\"$TMP\",\"product\":\"supermarket\",\"app\":\"retailer\"}" $B/v1/login)
-[ "$(echo "$L" | J "['role']")" = retailer_staff ] && ok "she signs in to the retailer app with it (forced password change)" || bad "staff login" "$L"
-[ "$(aut -X POST -H "X-Service-Key: $SVC" -H 'content-type: application/json' -d "{\"phone\":\"$PH2\",\"display_name\":\"Admin X\",\"role\":\"platform_admin\"}" -o /dev/null -w '%{http_code}' $B/v1/service/staff)" = 403 ] && ok "the product cannot create its own admins through the service key" || bad "admin creation"
-[ "$(aut -X POST -H "X-Service-Key: $SVC" -o /dev/null -w '%{http_code}' $B/v1/service/staff/$UID_/reset)" = 200 ] && ok "reset: a new temporary password, sessions ended" || bad reset
-[ "$(aut -X DELETE -H "X-Service-Key: $SVC" $B/v1/service/staff/$UID_ | J "['result']")" = disabled ] && ok "removing the only role switches the account off" || bad remove
-[ "$(aut -X POST -H "X-Service-Key: wrong" -o /dev/null -w '%{http_code}' $B/v1/service/staff/$UID_/reset)" = 403 ] && ok "a wrong service key is refused" || bad "wrong key"
+UID_=$(echo "$ST" | J "['user_id']")
+[ "$(echo "$ST" | J "['activation']")" = relay ] && ok "the product's backend enrols a retailer's staff member by phone (a WhatsApp activation code, like fidelia's merchants)" || bad "enrol" "$ST"
+L=$(aut -X POST -H 'content-type: application/json' -d "{\"phone\":\"$PH\",\"password\":\"Any-password-2026x\",\"product\":\"supermarket\",\"app\":\"retailer\"}" $B/v1/login)
+[ -n "$(echo "$L" | J "['detail']")" ] && [ -z "$(echo "$L" | J "['access_token']")" ] && ok "she cannot sign in before the team's code is typed (no password yet)" || bad "pending login" "$L"
+[ "$(aut -X POST -H "X-Service-Key: $SVC" -H 'content-type: application/json' -d "{\"phone\":\"$PH2\",\"display_name\":\"Admin X\",\"role\":\"platform_admin\"}" -o /dev/null -w '%{http_code}' $B/v1/service/staff)" = 403 ] && ok "the product cannot enrol its own admins through the service key" || bad "admin creation"
+[ "$(aut -X POST -H "X-Service-Key: $SVC" -H 'content-type: application/json' -d "{\"phone\":\"$PH\",\"display_name\":\"Again\",\"role\":\"retailer_staff\"}" $B/v1/service/staff | J "['detail']")" = phone_taken ] && ok "enrolling the same number again is refused" || bad "duplicate"
+[ "$(aut -X DELETE -H "X-Service-Key: $SVC" $B/v1/service/staff/$UID_ | J "['result']")" = disabled ] && ok "removing the only role switches the (still pending) account off" || bad remove
+[ "$(aut -X DELETE -H "X-Service-Key: wrong" -o /dev/null -w '%{http_code}' $B/v1/service/staff/$UID_)" = 403 ] && ok "a wrong service key is refused" || bad "wrong key"
 echo; echo "result: $pass passed, $failn failed"; [ "$failn" -eq 0 ]

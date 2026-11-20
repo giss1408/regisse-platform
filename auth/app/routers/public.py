@@ -36,6 +36,7 @@ class RegisterOut(BaseModel):
 class ActivateIn(BaseModel):
     phone: Phone
     code: str = Field(pattern=r"^\d{6}$")
+    password: str | None = Field(default=None, min_length=8, max_length=200)  # only for an account the team enrolled without one
 
 
 class LoginIn(BaseModel):
@@ -86,7 +87,7 @@ async def register(data: RegisterIn, request: Request, db: AsyncSession = Depend
 @router.post("/activate")
 async def activate(data: ActivateIn, request: Request, db: AsyncSession = Depends(get_session)) -> dict:
     accounts.ip_limit(get_settings().activate_ip_limit, "activate", client_ip(request))
-    await accounts.activate(db, raw_phone=data.phone, code=data.code)
+    await accounts.activate(db, raw_phone=data.phone, code=data.code, password=data.password)
     await db.commit()
     return {"status": "active"}
 
@@ -192,24 +193,16 @@ async def phone_change_confirm(data: PhoneConfirmIn, request: Request, p: Princi
 
 
 class ServiceStaffIn(BaseModel):
-    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=32)] | None = None
-    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=254)] | None = None
+    phone: Phone
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
     role: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z_]{1,31}$")]
 
 
 @router.post("/service/staff", status_code=201)
 async def service_staff_create(data: ServiceStaffIn, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
-    """The product's backend adds one of its staff (roles listed in the product's `service_staff_roles` only). The temporary password is
-    returned ONCE, to be handed over in person; the product decides which of its own admins may call this."""
-    out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=data.email, display_name=data.display_name, role=data.role, ip=client_ip(request))
-    await db.commit()
-    return out
-
-
-@router.post("/service/staff/{user_id}/reset")
-async def service_staff_reset(user_id: uuid.UUID, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
-    out = await accounts.service_reset_staff(db, caller, user_id, client_ip(request))
+    """The product's backend enrols one of its staff (roles listed in the product's `service_staff_roles` only) by phone: a pending account, an
+    activation code for the team to send on WhatsApp, a password chosen by the person. The product decides which of its own admins may call this."""
+    out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=None, display_name=data.display_name, role=data.role, ip=client_ip(request))
     await db.commit()
     return out
 

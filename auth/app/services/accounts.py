@@ -27,7 +27,7 @@ from app.tokens import utcnow
 
 # A hash to check against when the phone is unknown, so response time does not reveal which numbers have accounts.
 _DUMMY_HASH = hash_password("dummy-password-for-timing")
-PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent", "retailer_staff", "platform_admin"}
+PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent", "platform_admin"}
 CONSENT_VERSION = "2026-11"
 
 
@@ -131,6 +131,10 @@ def is_privileged(user: User) -> bool:
     return any(m.role in PRIVILEGED_ROLES for m in user.memberships)
 
 
+def kit_phone_value(user: User) -> str | None:
+    return user_phone(user)
+
+
 # --- registration and activation ----------------------------------------------------------------
 
 
@@ -163,7 +167,7 @@ async def register(db: AsyncSession, *, raw_phone: str, password: str, display_n
     return user
 
 
-async def activate(db: AsyncSession, *, raw_phone: str, code: str) -> User:
+async def activate(db: AsyncSession, *, raw_phone: str, code: str, password: str | None = None) -> User:
     user = await user_by_phone(db, normalize_phone(raw_phone))
     if user is None or user.status == "rejected":
         raise BadRequest("wrong_activation_code")
@@ -183,6 +187,13 @@ async def activate(db: AsyncSession, *, raw_phone: str, code: str) -> User:
         raise TooManyRequests("activation_locked") from None
     except kit_codes.NoActiveCode:
         raise BadRequest("no_activation_code") from None
+    if user.password_hash is None:
+        # An account enrolled by the team (a retailer's staff, like fidelia's merchants) has no password yet: the code proves the phone, and
+        # the person chooses hers here. Checked BEFORE the code is spent, so a weak password does not burn it.
+        if not password:
+            raise BadRequest("password_required")
+        check_password(password, kit_phone_value(user))
+        user.password_hash = await to_thread.run_sync(hash_password, password)
     user.status, user.phone_verified_at = "active", now
     await db.delete(ch)
     await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "activation", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
@@ -691,25 +702,37 @@ def _service_roles(product: str) -> set[str]:
 
 
 async def service_create_staff(db: AsyncSession, product: str, *, raw_phone: str | None, raw_email: str | None, display_name: str, role: str, ip: str | None) -> dict:
-    """The product's backend adds one of ITS staff (a role from `service_staff_roles`, never its admins; the product decides who may ask).
-    A new person gets a one-time temporary password (72 h) to hand over in person. A person who already has a customer account in this
-    product keeps her own password and just gains the role (`existing: true`)."""
+    """The product's backend enrols one of ITS staff (a role from `service_staff_roles`, never its admins; the product decides who may ask),
+    the way fidelia enrols a merchant: a pending account with no password and an activation request in the product's relay queue. The
+    team sends the WhatsApp code, the person types it with a password of her own (`/v1/activate`), then signs in with phone + password.
+    A person who already has a customer account in this product keeps her password and just gains the role (`existing: true`)."""
     if role not in _service_roles(product):
         raise Forbidden("role_not_allowed")
-    cfg = product_config(product)
-    phone = normalize_phone(raw_phone) if raw_phone else None
-    existing = await user_by_phone(db, phone, lock=True) if phone else None
+    if not raw_phone:
+        raise BadRequest("phone_required")
+    phone = normalize_phone(raw_phone)
+    existing = await user_by_phone(db, phone, lock=True)
     if existing is not None:
         mine = [m for m in existing.memberships if m.product == product]
-        if role in cfg.get("totp_roles", []) or existing.status != "active" or not mine or any(m.role in PRIVILEGED_ROLES for m in existing.memberships):
+        if existing.status != "active" or not mine or any(m.role in PRIVILEGED_ROLES for m in existing.memberships):
             raise Conflict("phone_taken")
         if not any(m.role == role for m in mine):
             db.add(Membership(user_id=existing.id, product=product, role=role))
         await audit(db, actor_type="service", actor_id=None, action="staff.role_added", entity="user", entity_id=existing.id, ip=ip, detail={"product": product, "role": role})
         await db.flush()
-        return {"user_id": str(existing.id), "existing": True, "temporary_password": None, "totp": None}
-    out = await create_staff(db, raw_phone=raw_phone, raw_email=raw_email, display_name=display_name, product=product, role=role, admin_id=None, ip=ip, actor_type="service")
-    return {**out, "existing": False}
+        return {"user_id": str(existing.id), "existing": True, "activation": None}
+    user = User(phone_enc=cipher().encrypt(phone), phone_hash=hasher().phone(phone), display_name=clean_name(display_name), password_hash=None,
+                status="pending_activation")
+    user.memberships = [Membership(product=product, role=role)]
+    db.add(user)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise Conflict("phone_taken") from None
+    db.add(RelayRequest(user_id=user.id, product=product, purpose="activation"))
+    await audit(db, actor_type="service", actor_id=None, action="staff.enrolled", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "role": role})
+    return {"user_id": str(user.id), "existing": False, "activation": "relay"}
 
 
 async def _service_staff_user(db: AsyncSession, product: str, user_id: uuid.UUID) -> User:
@@ -717,12 +740,6 @@ async def _service_staff_user(db: AsyncSession, product: str, user_id: uuid.UUID
     if user is None or not any(m.product == product and m.role in _service_roles(product) for m in user.memberships):
         raise NotFound("user_not_found")  # another product's person does not exist for this key
     return user
-
-
-async def service_reset_staff(db: AsyncSession, product: str, user_id: uuid.UUID, ip: str | None) -> dict:
-    """A new temporary password for one of the product's staff (privileged accounts never use the WhatsApp relay), sessions ended."""
-    user = await _service_staff_user(db, product, user_id)
-    return await reset_staff(db, user.id, reset_totp=False, admin_id=None, ip=ip, actor_type="service")
 
 
 async def service_remove_staff(db: AsyncSession, product: str, user_id: uuid.UUID, ip: str | None) -> str:
