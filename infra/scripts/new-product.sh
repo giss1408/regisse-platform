@@ -52,6 +52,9 @@ RCLI ACL SAVE >/dev/null
 cat > "conf.d/$name.caddy" <<CADDY
 ${SITE_SCHEME:-}${name}-api.${DOMAIN} {
 	encode zstd gzip
+	# Private routes (called by the auth service over the private network) are not published on the public hostname.
+	@private path /internal/* /api/internal/*
+	respond @private 404
 	reverse_proxy ${upstream} {
 		health_uri /healthz
 		health_interval 5s
