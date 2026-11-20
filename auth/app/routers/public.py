@@ -143,6 +143,23 @@ async def delete_me(data: DeleteMeIn, request: Request, p: Principal = Depends(c
     await db.commit()
 
 
+class EraseForProductIn(BaseModel):
+    phone: str = Field(min_length=6, max_length=32)
+
+
+@router.post("/service/erase")
+async def service_erase(data: EraseForProductIn, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
+    """A product tells auth it erased a person (the self-service deletion or an admin acting on a request): her access to THAT product
+    ends, and her identity is erased when nothing else is left. Service key, own product only; staff are refused; idempotent."""
+    try:
+        e164 = accounts.normalize_phone(data.phone)
+    except Exception:
+        return {"result": "unknown"}
+    result = await accounts.erase_for_product(db, caller, e164, client_ip(request))
+    await db.commit()
+    return {"result": result}
+
+
 @router.get("/me")
 async def me(p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
     user = await db.get(User, p.user_id)

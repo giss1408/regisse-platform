@@ -480,6 +480,33 @@ async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str
     await audit(db, actor_type="user", actor_id=user.id, action="user.erased", entity="user", entity_id=user.id, ip=ip)
 
 
+async def erase_for_product(db: AsyncSession, product: str, e164: str, ip: str | None) -> str:
+    """The product erased this person's data (customer deletion, or an admin acting on a deletion request): drop her access to THAT
+    product; when no access to any product is left, erase the identity too. One user pool: a person who also holds a membership in
+    another product keeps her account there. Staff are never erased this way. Idempotent: an unknown or already erased number is
+    `unknown`. Returns `erased`, `membership_removed`, `unknown` or `staff_refused`. The caller commits."""
+    user = await user_by_phone(db, e164, lock=True)
+    if user is None or user.status == "disabled" and user.phone_enc is None:
+        return "unknown"
+    if is_privileged(user):
+        return "staff_refused"
+    mine = [m for m in user.memberships if m.product == product]
+    if not mine:
+        return "unknown"
+    for m in mine:
+        await db.delete(m)
+    await db.flush()
+    await db.refresh(user, ["memberships"])
+    await revoke_all_sessions(db, user.id)
+    if user.memberships:
+        await audit(db, actor_type="service", actor_id=None, action="user.product_erased", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
+        return "membership_removed"
+    user.phone_enc = user.phone_hash = user.display_name = user.password_hash = user.totp_secret_enc = None
+    user.status = "disabled"
+    await audit(db, actor_type="service", actor_id=None, action="user.erased", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
+    return "erased"
+
+
 async def step_up(db: AsyncSession, p, password: str, totp: str | None, ip: str | None) -> dict:
     """Fresh proof for the CURRENT session (same `sid`). Failures count like login failures (lockout, per-IP limit)."""
     s = get_settings()
