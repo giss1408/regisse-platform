@@ -89,10 +89,25 @@ class CodeChallenge(Base):
     __table_args__ = (UniqueConstraint("user_id", "purpose"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    purpose: Mapped[str] = mapped_column(String(24))  # activation
+    purpose: Mapped[str] = mapped_column(String(24))  # activation | phone_change
     code_hash: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PhoneChange(Base):
+    """A person asked to move her account to a new number. The code goes to the NEW number through the admin relay; the change only
+    happens when she types it. One pending request per user (a new request replaces the old)."""
+
+    __tablename__ = "phone_changes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    product: Mapped[str] = mapped_column(String(32))  # the product she asked from
+    new_phone_enc: Mapped[bytes] = mapped_column(LargeBinary)
+    new_phone_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(12), default="requested")  # requested | done | replaced | failed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    completed_at: Mapped[datetime | None] = _ts()
 
 
 class RelayRequest(Base):
@@ -103,7 +118,7 @@ class RelayRequest(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     product: Mapped[str] = mapped_column(String(32))
-    purpose: Mapped[str] = mapped_column(String(24))  # activation | password_reset
+    purpose: Mapped[str] = mapped_column(String(24))  # activation | password_reset | phone_change
     status: Mapped[str] = mapped_column(String(12), default="open")  # open | sent | rejected | done
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     handled_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

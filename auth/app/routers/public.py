@@ -160,6 +160,31 @@ async def service_erase(data: EraseForProductIn, request: Request, caller: str =
     return {"result": result}
 
 
+class PhoneChangeIn(BaseModel):
+    new_phone: Phone
+    current_password: str = Field(min_length=1, max_length=200)
+
+
+class PhoneConfirmIn(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+@router.post("/me/phone/request", status_code=202)
+async def phone_change_request(data: PhoneChangeIn, request: Request, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
+    """Move my account to another number. Password required; the code for the NEW number is sent by the team on WhatsApp."""
+    masked = await accounts.request_phone_change(db, p, data.new_phone, data.current_password, client_ip(request))
+    await db.commit()
+    return {"new_phone_masked": masked, "status": "waiting_for_code"}
+
+
+@router.post("/me/phone/confirm")
+async def phone_change_confirm(data: PhoneConfirmIn, request: Request, p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
+    """The code from the new number. Every other session ends; this one keeps working: renew it (POST /v1/refresh) to get the new number."""
+    masked = await accounts.confirm_phone_change(db, p, data.code, client_ip(request))
+    await db.commit()
+    return {"phone_masked": masked}
+
+
 @router.get("/me")
 async def me(p: Principal = Depends(current_principal), db: AsyncSession = Depends(get_session)) -> dict:
     user = await db.get(User, p.user_id)

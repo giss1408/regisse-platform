@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     products_json: str = ""
     # JSON: {"flariane": "<secret>"}: service keys for /v1/introspect
     service_keys_json: str = ""
+    # JSON: {"fidelia": {"url": "http://fidelia-api:8000/api/internal/phone-changed", "key": "<secret>"}}: products that keep data keyed
+    # by phone and must move it BEFORE a number change takes effect. Only these configured URLs are ever called.
+    product_hooks_json: str = ""
 
     # Rate limits
     register_per_ip_hour: int = 10
@@ -84,6 +87,10 @@ class Settings(BaseSettings):
         if self.products_json:
             merged.update(json.loads(self.products_json))
         return merged
+
+    @property
+    def product_hooks(self) -> dict[str, dict]:
+        return json.loads(self.product_hooks_json) if self.product_hooks_json else {}
 
     @property
     def service_keys(self) -> dict[str, str]:

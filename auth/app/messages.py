@@ -26,3 +26,11 @@ def temp_password(product: str, display_name: str | None, temp: str) -> str:
         "Connecte-toi dans les 24 h avec ce mot de passe : l’app te demandera d’en choisir un nouveau. "
         "Si tu n’as pas fait cette demande, réponds-nous ici."
     )
+
+
+def phone_change(product: str, display_name: str | None, code: str) -> str:
+    return (
+        f"Bonjour {first_name(display_name)} 👋 Ton code pour changer de numéro sur {label(product)} : *{code}*\n\n"
+        f"Saisis-le dans l’app {label(product)} pour confirmer ce nouveau numéro. "
+        "Si tu n’as pas fait cette demande, ne le donne à personne et réponds-nous ici."
+    )

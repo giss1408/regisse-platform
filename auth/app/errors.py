@@ -36,6 +36,10 @@ class TooManyRequests(DomainError):
     status_code = 429
 
 
+class ServiceUnavailable(DomainError):
+    status_code = 503
+
+
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:

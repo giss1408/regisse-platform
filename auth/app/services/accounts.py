@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import messages, tokens
 from app.audit import audit
 from app.config import get_settings
-from app.errors import BadRequest, Conflict, Forbidden, NotFound, TooManyRequests, Unauthorized
-from app.models import CodeChallenge, LegacyIdentity, Membership, RefreshToken, RelayRequest, User
+from app.services import product_hooks
+from app.errors import BadRequest, Conflict, Forbidden, NotFound, ServiceUnavailable, TooManyRequests, Unauthorized
+from app.models import CodeChallenge, LegacyIdentity, Membership, PhoneChange, RefreshToken, RelayRequest, User
 from app.ratelimit import item, limiter
 from app.tokens import utcnow
 
@@ -214,6 +215,19 @@ async def relay_send(db: AsyncSession, req: RelayRequest, admin_id: uuid.UUID, i
         await revoke_all_sessions(db, user.id)
         text = messages.temp_password(req.product, user.display_name, temp)
         req.status = "done"
+    elif req.purpose == "phone_change":
+        pc = await db.scalar(select(PhoneChange).where(PhoneChange.user_id == user.id, PhoneChange.status == "requested"))
+        if pc is None or user.status != "active":
+            raise Conflict("request_closed")
+        new_phone = cipher().decrypt(pc.new_phone_enc)
+        if await user_by_phone(db, new_phone) is not None:
+            raise Conflict("phone_taken")
+        kit_ch, code = kit_codes.issue(hasher(), str(user.id), "phone_change", now, timedelta(hours=s.activation_code_hours))
+        await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
+        db.add(CodeChallenge(user_id=user.id, purpose="phone_change", code_hash=kit_ch.code_hash, expires_at=kit_ch.expires_at))
+        text = messages.phone_change(req.product, user.display_name, code)
+        req.status = "sent"
+        phone = new_phone  # the code goes to the NEW number: that is what proves it is hers
     else:
         raise BadRequest("unknown_purpose")
     req.handled_by, req.handled_at = admin_id, now
@@ -232,6 +246,82 @@ async def relay_reject(db: AsyncSession, req: RelayRequest, admin_id: uuid.UUID,
     user.status = "rejected"
     req.status, req.handled_by, req.handled_at = "rejected", admin_id, utcnow()
     await audit(db, actor_type="admin", actor_id=admin_id, action="relay.activation.rejected", entity="user", entity_id=user.id, ip=ip)
+
+
+async def request_phone_change(db: AsyncSession, p, new_raw_phone: str, current_password: str, ip: str | None) -> str:
+    """She asks to move her account to another number: password required (a stolen access token or an unlocked phone is not enough);
+    the code for the NEW number goes through the admin relay. Staff change theirs through a super admin. Returns the masked number."""
+    s = get_settings()
+    ip_limit(s.login_ip_limit, "login", ip)
+    user = await db.scalar(select(User).where(User.id == p.user_id).with_for_update())
+    if user is None or user.status != "active" or not user.password_hash:
+        raise Unauthorized("invalid_token")
+    if is_privileged(user):
+        raise Forbidden("staff_cannot_change_phone")
+    fail_key = f"login-fail:{user.id}"
+    if not limiter().test(item(s.login_fail_limit), fail_key):
+        raise TooManyRequests("login_locked")
+    if not await to_thread.run_sync(verify_password, user.password_hash, current_password):
+        limiter().hit(item(s.login_fail_limit), fail_key)
+        raise Unauthorized("invalid_credentials")
+    if not limiter().hit(item("5/day"), f"phone-change:{user.id}"):
+        raise TooManyRequests("rate_limited")
+    new_phone = normalize_phone(new_raw_phone)
+    if new_phone == user_phone(user):
+        raise BadRequest("same_phone")
+    if await user_by_phone(db, new_phone) is not None:
+        raise Conflict("phone_taken")  # she is signed in and proved her password: telling her costs nothing
+    await db.execute(update(PhoneChange).where(PhoneChange.user_id == user.id, PhoneChange.status == "requested").values(status="replaced"))
+    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
+    await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
+    db.add(PhoneChange(user_id=user.id, product=p.product, new_phone_enc=cipher().encrypt(new_phone), new_phone_hash=hasher().phone(new_phone)))
+    db.add(RelayRequest(user_id=user.id, product=p.product, purpose="phone_change"))
+    await audit(db, actor_type="user", actor_id=user.id, action="user.phone_change_requested", entity="user", entity_id=user.id, ip=ip)
+    return kit_phone.mask_phone(new_phone)
+
+
+async def confirm_phone_change(db: AsyncSession, p, code: str, ip: str | None) -> str:
+    """She typed the code the team sent to the new number. Products that key data by phone move it first (a failure stops everything,
+    nothing changes here); then the number changes, every OTHER session ends, and her current session renews with the new number."""
+    s = get_settings()
+    ip_limit(s.activate_ip_limit, "activate", ip)
+    user = await db.scalar(select(User).where(User.id == p.user_id).with_for_update())
+    pc = await db.scalar(select(PhoneChange).where(PhoneChange.user_id == user.id, PhoneChange.status == "requested")) if user else None
+    if user is None or user.status != "active" or pc is None:
+        raise BadRequest("wrong_activation_code")
+    ch = await db.scalar(select(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change").with_for_update())
+    now = utcnow()
+    kit_ch = kit_codes.CodeChallenge(code_hash=ch.code_hash, expires_at=ch.expires_at, attempts=ch.attempts) if ch else None
+    try:
+        kit_codes.check(hasher(), kit_ch, str(user.id), "phone_change", code, now)
+    except kit_codes.WrongCode:
+        ch.attempts = kit_ch.attempts  # type: ignore[union-attr]
+        await db.commit()
+        raise BadRequest("wrong_activation_code") from None
+    except kit_codes.TooManyAttempts:
+        raise TooManyRequests("activation_locked") from None
+    except kit_codes.NoActiveCode:
+        raise BadRequest("no_activation_code") from None
+    old_phone, new_phone = user_phone(user), cipher().decrypt(pc.new_phone_enc)
+    if await user_by_phone(db, new_phone) is not None:
+        raise Conflict("phone_taken")
+    try:
+        for product in sorted({m.product for m in user.memberships}):
+            await product_hooks.phone_changed(product, old_phone or "", new_phone)
+    except product_hooks.HookFailed:
+        raise ServiceUnavailable("product_unavailable") from None
+    user.phone_enc, user.phone_hash, user.phone_verified_at = pc.new_phone_enc, pc.new_phone_hash, now
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise Conflict("phone_taken") from None
+    pc.status, pc.completed_at = "done", now
+    await db.delete(ch)
+    await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
+    await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != p.sid).values(revoked_at=now))
+    await audit(db, actor_type="user", actor_id=user.id, action="user.phone_changed", entity="user", entity_id=user.id, ip=ip)
+    return kit_phone.mask_phone(new_phone)
 
 
 async def request_password_reset(db: AsyncSession, *, raw_phone: str, product: str, ip: str | None) -> None:
