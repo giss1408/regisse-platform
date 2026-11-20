@@ -176,3 +176,17 @@ async def test_the_platform_admin_needs_the_authenticator_to_sign_in(client):
     await make_user("0704040404", role="platform_admin", product="supermarket")  # no authenticator set up
     out = await client.post("/v1/login", json={"phone": "0704040404", "password": PASSWORD, "product": "supermarket", "app": "admin"})
     assert out.status_code == 403 and out.json()["detail"] == "totp_not_set_up"
+
+
+async def test_a_product_may_ask_for_the_name_of_one_of_its_people_and_nothing_else(client):
+    mine = await make_user("0701010101", role="customer", product="supermarket", name="Awa Koné")
+    other = await make_user("0702020202", role="customer", product="flariane", name="Not Yours")
+    r = await client.get(f"/v1/service/users/{mine.id}", headers=SMK)
+    assert r.status_code == 200 and r.json() == {"id": str(mine.id), "display_name": "Awa Koné"}  # no phone
+    assert (await client.get(f"/v1/service/users/{other.id}", headers=SMK)).status_code == 404
+    assert (await client.get(f"/v1/service/users/{uuid.uuid4()}", headers=SMK)).status_code == 404
+    assert (await client.get(f"/v1/service/users/{mine.id}", headers={"X-Service-Key": "wrong"})).status_code == 403
+    async with SessionLocal() as db:
+        (await db.get(User, mine.id)).status = "disabled"
+        await db.commit()
+    assert (await client.get(f"/v1/service/users/{mine.id}", headers=SMK)).status_code == 404  # a switched-off person is not served

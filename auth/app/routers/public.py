@@ -10,7 +10,7 @@ from app.audit import client_ip
 from app.config import get_settings
 from app.db import get_session
 from app.deps import Principal, current_principal, service_caller
-from app.errors import BadRequest, Forbidden, Unauthorized
+from app.errors import BadRequest, Forbidden, NotFound, Unauthorized
 from app.models import User
 from app.services import accounts
 
@@ -207,6 +207,16 @@ async def service_staff_create(data: ServiceStaffIn, request: Request, caller: s
     out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=None, display_name=data.display_name, role=data.role, ip=client_ip(request), allow_existing=data.allow_existing)
     await db.commit()
     return out
+
+
+@router.get("/service/users/{user_id}")
+async def service_user(user_id: uuid.UUID, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
+    """What a product may know about one of ITS people: the name she gave when she signed up (so a profile opened from a token is not blank).
+    Never the phone number. A person of another product does not exist for this key."""
+    user = await db.get(User, user_id)
+    if user is None or user.status != "active" or not any(m.product == caller for m in user.memberships):
+        raise NotFound("user_not_found")
+    return {"id": str(user.id), "display_name": user.display_name}
 
 
 @router.delete("/service/staff/{user_id}")
