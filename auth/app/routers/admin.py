@@ -32,11 +32,13 @@ class QueueItem(BaseModel):
 
 
 @router.get("/relay-queue", response_model=list[QueueItem])
-async def relay_queue(status: Literal["open", "sent", "all"] = "open", admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)):
+async def relay_queue(status: Literal["open", "sent", "pending", "all"] = "open", admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)):
     q = select(RelayRequest).order_by(RelayRequest.created_at)
     if admin.scope:
         q = q.where(RelayRequest.product == admin.scope)
-    if status != "all":
+    if status == "pending":  # still to send, or sent and waiting for the person to type it: can be sent again
+        q = q.where(RelayRequest.status.in_(["open", "sent"]))
+    elif status != "all":
         q = q.where(RelayRequest.status == status)
     out = []
     for r in (await db.scalars(q.limit(200))).all():
@@ -57,7 +59,10 @@ async def _req(db: AsyncSession, request_id: int, admin: Principal | None = None
 @router.post("/relay/{request_id}/send")
 async def relay_send(request_id: int, request: Request, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """New code (or temporary password) + wa.me link: the admin sends it from their WhatsApp, the user types it in the app."""
-    url = await accounts.relay_send(db, await _req(db, request_id, admin), admin.user_id, client_ip(request))
+    req = await _req(db, request_id, admin)
+    if req.purpose == "password_reset":
+        require_fresh(admin)  # a temporary password lets whoever types it into the account: password + a recent authenticator code, again
+    url = await accounts.relay_send(db, req, admin.user_id, client_ip(request))
     await db.commit()
     return {"url": url}
 

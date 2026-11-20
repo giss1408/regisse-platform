@@ -113,3 +113,20 @@ async def test_who_may_not(client):
         await db.execute(delete(Membership).where(Membership.product == "fidelia", Membership.role == "admin"))
         await db.commit()
     assert (await client.get("/v1/admin/phone-changes", headers=team)).status_code == 403  # demoted: at once, not at token expiry
+
+
+async def test_pending_means_open_or_sent_and_a_temporary_password_needs_a_recent_proof(client):
+    await make_user("0701010101", role="customer", product="fidelia")
+    await client.post("/v1/password/reset-request", json={"phone": "0701010101", "product": "fidelia"})
+    await client.post("/v1/register", json={"phone": "0703030303", "password": "Pending-pass-2026", "product": "fidelia", "consent": True})
+    team = await product_admin("fidelia", phone="0700000077")
+    rows = (await client.get("/v1/admin/relay-queue", params={"status": "pending"}, headers=team)).json()
+    by = {r["purpose"]: r for r in rows}
+    assert set(by) == {"activation", "password_reset"}
+    stale = await product_admin("fidelia", phone="0700000078", age=900)
+    r = await client.post(f"/v1/admin/relay/{by['password_reset']['id']}/send", headers=stale)
+    assert r.status_code == 403 and r.json()["detail"] == "step_up_required"
+    assert (await client.post(f"/v1/admin/relay/{by['activation']['id']}/send", headers=stale)).status_code == 200  # an activation code needs no fresh proof
+    assert (await client.post(f"/v1/admin/relay/{by['password_reset']['id']}/send", headers=team)).status_code == 200
+    again = {r["purpose"] for r in (await client.get("/v1/admin/relay-queue", params={"status": "pending"}, headers=team)).json()}
+    assert again == {"activation"}  # sent once and waiting for the code: still listed so it can be re-sent; the reset is done
