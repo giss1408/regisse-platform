@@ -82,7 +82,8 @@ async def search_user(phone: str | None = None, email: str | None = None, admin:
     user = await accounts.user_by_phone(db, accounts.normalize_phone(phone)) if phone else await accounts.user_by_email(db, accounts.normalize_email(email or ""))
     if user is None or (admin.scope and not any(m.product == admin.scope for m in user.memberships)):
         raise NotFound("user_not_found")
-    return {"id": str(user.id), "display_name": user.display_name, "status": user.status,
+    phone_masked = accounts.kit_phone.mask_phone(accounts.user_phone(user) or "") if user.phone_enc else None
+    return {"id": str(user.id), "display_name": user.display_name, "status": user.status, "phone_masked": phone_masked,
             "memberships": [{"product": m.product, "role": m.role} for m in user.memberships]}
 
 
@@ -200,14 +201,21 @@ async def phone_change_not_me(change_id: int, request: Request, admin: Principal
 
 
 @router.post("/users/{user_id}/disable", status_code=204)
-async def disable_user(user_id: uuid.UUID, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> None:
+async def disable_user(user_id: uuid.UUID, request: Request, data: EnableIn | None = None, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> None:
+    """Switches an account off and ends its sessions (a stolen phone, fraud, a request). A product's own admin acts on her product's people
+    only, needs a recent proof and a written note (10+ characters, kept in the audit); the account is given back from `/frozen-users`."""
     user = await _user(db, user_id)
-    _guard_staff_target(admin, user)
+    _guard_scoped_target(admin, user)
     if user.id == admin.user_id:
         raise Conflict("cannot_disable_self")
+    note = (data.note or "").strip() if data else ""
+    if admin.scope:
+        require_fresh(admin)
+        if len(note) < 10:
+            raise BadRequest("note_required")
     user.status = "disabled"
     await accounts.revoke_all_sessions(db, user.id)
-    await audit(db, actor_type="admin", actor_id=admin.user_id, action="user.disabled", entity="user", entity_id=user.id, ip=client_ip(request))
+    await audit(db, actor_type="admin", actor_id=admin.user_id, action="user.disabled", entity="user", entity_id=user.id, ip=client_ip(request), detail={"note": note} if note else None)
     await db.commit()
 
 

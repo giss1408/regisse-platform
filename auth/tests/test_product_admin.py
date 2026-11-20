@@ -222,3 +222,46 @@ async def test_user_search_by_a_product_admin_stays_in_her_product_and_by_phone(
     assert (await client.get("/v1/admin/users/search", params={"phone": "0701010101"}, headers=team)).status_code == 200
     assert (await client.get("/v1/admin/users/search", params={"phone": "0702020202"}, headers=team)).status_code == 404
     assert (await client.get("/v1/admin/users/search", params={"email": "x@y.fr"}, headers=team)).status_code == 403
+
+
+# --- disabling an account ------------------------------------------------------------------------------------------------
+
+
+async def test_a_product_admin_switches_an_account_off_with_a_note_and_a_recent_proof(client):
+    h = await customer(client, "0701010101", FID)
+    team = await product_admin("fidelia")
+    uid = (await client.get("/v1/admin/users/search", params={"phone": "0701010101"}, headers=team)).json()["id"]
+    stale = await product_admin("fidelia", phone="0700000078", age=900)
+    note = {"note": "Téléphone volé, signalé par la cliente"}
+    assert (await client.post(f"/v1/admin/users/{uid}/disable", headers=stale, json=note)).json()["detail"] == "step_up_required"
+    assert (await client.post(f"/v1/admin/users/{uid}/disable", headers=team)).json()["detail"] == "note_required"
+    assert (await client.post(f"/v1/admin/users/{uid}/disable", headers=team, json={"note": "court"})).json()["detail"] == "note_required"
+    assert (await client.post(f"/v1/admin/users/{uid}/disable", headers=team, json=note)).status_code == 204
+    assert (await client.post("/v1/login", json={"phone": "0701010101", **FID})).json()["detail"] == "account_blocked"
+    assert (await client.get("/v1/me", headers=h)).status_code == 401  # a live access token stops working at once
+    listed = (await client.get("/v1/admin/frozen-users", headers=team)).json()
+    assert [(x["reason"]) for x in listed] == ["disabled"]
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    async with SessionLocal() as db:
+        row = (await db.scalars(select(AuditLog).where(AuditLog.action == "user.disabled"))).all()[-1]
+        assert "volé" in row.detail["note"]
+
+
+async def test_disabling_stays_inside_her_product_and_never_touches_staff_or_herself(client):
+    flr = await make_user("0702020202", role="customer", product="flariane")
+    staff = await make_user("0703030303", role="admin", product="auth")
+    agent = await make_user("0705050505", role="agent", product="fidelia")
+    team = await product_admin("fidelia")
+    note = {"note": "Fraude constatée, voir le dossier"}
+    assert (await client.post(f"/v1/admin/users/{flr.id}/disable", headers=team, json=note)).status_code == 404
+    assert (await client.post(f"/v1/admin/users/{staff.id}/disable", headers=team, json=note)).status_code == 404
+    assert (await client.post(f"/v1/admin/users/{agent.id}/disable", headers=team, json=note)).json()["detail"] == "super_admin_only"
+    boss = await product_admin("fidelia", role="super_admin", phone="0700000090")
+    assert (await client.post(f"/v1/admin/users/{agent.id}/disable", headers=boss, json=note)).status_code == 204
+    me = (await client.get("/v1/admin/users/search", params={"phone": "0700000090"}, headers=boss)).json()["id"]
+    assert (await client.post(f"/v1/admin/users/{me}/disable", headers=boss, json=note)).json()["detail"] == "cannot_disable_self"
+    async with SessionLocal() as db:
+        assert (await db.get(type(flr), flr.id)).status == "active"
