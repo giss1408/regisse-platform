@@ -27,7 +27,7 @@ from app.tokens import utcnow
 
 # A hash to check against when the phone is unknown, so response time does not reveal which numbers have accounts.
 _DUMMY_HASH = hash_password("dummy-password-for-timing")
-PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent"}
+PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent", "retailer_staff", "platform_admin"}
 CONSENT_VERSION = "2026-11"
 
 
@@ -115,6 +115,16 @@ def product_config(product: str) -> dict:
     if cfg is None:
         raise BadRequest("unknown_product")
     return cfg
+
+
+def admin_roles(product: str) -> set[str]:
+    """Roles that run a product's relay and reviews (default: super_admin and admin)."""
+    return set(get_settings().products.get(product, {}).get("admin_roles", ["super_admin", "admin"]))
+
+
+def top_admin_roles(product: str) -> set[str]:
+    """Among those, the roles that may also act on the product's own staff (default: super_admin)."""
+    return set(get_settings().products.get(product, {}).get("top_admin_roles", ["super_admin"]))
 
 
 def is_privileged(user: User) -> bool:
@@ -614,7 +624,7 @@ def _temp_password(n: int = 12) -> str:
     return "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(n))
 
 
-async def create_staff(db: AsyncSession, *, raw_phone: str | None, raw_email: str | None = None, display_name: str, product: str, role: str, admin_id: uuid.UUID, ip: str | None) -> dict:
+async def create_staff(db: AsyncSession, *, raw_phone: str | None, raw_email: str | None = None, display_name: str, product: str, role: str, admin_id: uuid.UUID | None, ip: str | None, actor_type: str = "admin") -> dict:
     """Creates an ACTIVE staff account with a one-time temporary password (and an authenticator secret for roles that need one).
     Both are returned once to the super admin, who hands them over in person: they never travel by WhatsApp.
     A staff account has a phone, an email, or both (the login identifier)."""
@@ -641,7 +651,7 @@ async def create_staff(db: AsyncSession, *, raw_phone: str | None, raw_email: st
     user.memberships = [Membership(product=product, role=role, created_by=admin_id)]
     db.add(user)
     await db.flush()
-    await audit(db, actor_type="admin", actor_id=admin_id, action="staff.created", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "role": role})
+    await audit(db, actor_type=actor_type, actor_id=admin_id, action="staff.created", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "role": role})
     return _staff_secrets(user, phone or email or "", temp, secret)
 
 
@@ -652,7 +662,7 @@ def _staff_secrets(user: User, ident: str, temp: str, secret: str | None) -> dic
     return out
 
 
-async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool, admin_id: uuid.UUID, ip: str | None) -> dict:
+async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool, admin_id: uuid.UUID | None, ip: str | None, actor_type: str = "admin") -> dict:
     user = await db.get(User, user_id)
     if user is None or (user.phone_enc is None and user.email_enc is None):
         raise NotFound("user_not_found")
@@ -669,8 +679,65 @@ async def reset_staff(db: AsyncSession, user_id: uuid.UUID, *, reset_totp: bool,
         secret = pyotp.random_base32()
         user.totp_secret_enc, user.totp_last_step = cipher().encrypt(secret), 0
     await revoke_all_sessions(db, user.id)
-    await audit(db, actor_type="admin", actor_id=admin_id, action="staff.reset", entity="user", entity_id=user.id, ip=ip, detail={"totp_reset": reset_totp})
+    await audit(db, actor_type=actor_type, actor_id=admin_id, action="staff.reset", entity="user", entity_id=user.id, ip=ip, detail={"totp_reset": reset_totp})
     return _staff_secrets(user, user_phone(user) or (cipher().decrypt(user.email_enc) if user.email_enc else ""), temp, secret)
+
+
+# --- staff of a product, managed by the product's own backend (service key) -----------------------------------------------------
+
+
+def _service_roles(product: str) -> set[str]:
+    return set(get_settings().products.get(product, {}).get("service_staff_roles", []))
+
+
+async def service_create_staff(db: AsyncSession, product: str, *, raw_phone: str | None, raw_email: str | None, display_name: str, role: str, ip: str | None) -> dict:
+    """The product's backend adds one of ITS staff (a role from `service_staff_roles`, never its admins; the product decides who may ask).
+    A new person gets a one-time temporary password (72 h) to hand over in person. A person who already has a customer account in this
+    product keeps her own password and just gains the role (`existing: true`)."""
+    if role not in _service_roles(product):
+        raise Forbidden("role_not_allowed")
+    cfg = product_config(product)
+    phone = normalize_phone(raw_phone) if raw_phone else None
+    existing = await user_by_phone(db, phone, lock=True) if phone else None
+    if existing is not None:
+        mine = [m for m in existing.memberships if m.product == product]
+        if role in cfg.get("totp_roles", []) or existing.status != "active" or not mine or any(m.role in PRIVILEGED_ROLES for m in existing.memberships):
+            raise Conflict("phone_taken")
+        if not any(m.role == role for m in mine):
+            db.add(Membership(user_id=existing.id, product=product, role=role))
+        await audit(db, actor_type="service", actor_id=None, action="staff.role_added", entity="user", entity_id=existing.id, ip=ip, detail={"product": product, "role": role})
+        await db.flush()
+        return {"user_id": str(existing.id), "existing": True, "temporary_password": None, "totp": None}
+    out = await create_staff(db, raw_phone=raw_phone, raw_email=raw_email, display_name=display_name, product=product, role=role, admin_id=None, ip=ip, actor_type="service")
+    return {**out, "existing": False}
+
+
+async def _service_staff_user(db: AsyncSession, product: str, user_id: uuid.UUID) -> User:
+    user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if user is None or not any(m.product == product and m.role in _service_roles(product) for m in user.memberships):
+        raise NotFound("user_not_found")  # another product's person does not exist for this key
+    return user
+
+
+async def service_reset_staff(db: AsyncSession, product: str, user_id: uuid.UUID, ip: str | None) -> dict:
+    """A new temporary password for one of the product's staff (privileged accounts never use the WhatsApp relay), sessions ended."""
+    user = await _service_staff_user(db, product, user_id)
+    return await reset_staff(db, user.id, reset_totp=False, admin_id=None, ip=ip, actor_type="service")
+
+
+async def service_remove_staff(db: AsyncSession, product: str, user_id: uuid.UUID, ip: str | None) -> str:
+    """Takes the product's staff role(s) away and ends her sessions; an account left with no access at all is switched off."""
+    user = await _service_staff_user(db, product, user_id)
+    for m in [m for m in user.memberships if m.product == product and m.role in _service_roles(product)]:
+        await db.delete(m)
+    await db.flush()
+    await db.refresh(user, ["memberships"])
+    await revoke_all_sessions(db, user.id)
+    left = bool(user.memberships)
+    if not left:
+        user.status = "disabled"
+    await audit(db, actor_type="service", actor_id=None, action="staff.removed", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
+    return "role_removed" if left else "disabled"
 
 
 async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str, ip: str | None, *, check_only: bool = False) -> None:
@@ -691,13 +758,16 @@ async def erase_self(db: AsyncSession, user_id: uuid.UUID, current_password: str
     await audit(db, actor_type="user", actor_id=user.id, action="user.erased", entity="user", entity_id=user.id, ip=ip)
 
 
-async def erase_for_product(db: AsyncSession, product: str, e164: str, ip: str | None) -> str:
+async def erase_for_product(db: AsyncSession, product: str, e164: str | None, ip: str | None, *, user_id: uuid.UUID | None = None) -> str:
     """The product erased this person's data (customer deletion, or an admin acting on a deletion request): drop her access to THAT
     product; when no access to any product is left, erase the identity too. One user pool: a person who also holds a membership in
     another product keeps her account there. Staff are never erased this way. Idempotent: an unknown or already erased number is
     `unknown`. Returns `erased`, `membership_removed`, `unknown` or `staff_refused`. The caller commits."""
-    user = await user_by_phone(db, e164, lock=True)
-    if user is None or user.status == "disabled" and user.phone_enc is None:
+    if user_id is not None:  # a product that knows the auth user id (it keeps no phone number) erases by id
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+    else:
+        user = await user_by_phone(db, e164 or "", lock=True)
+    if user is None or user.status == "disabled" and user.phone_enc is None and user.email_enc is None:
         return "unknown"
     if is_privileged(user):
         return "staff_refused"
@@ -712,7 +782,7 @@ async def erase_for_product(db: AsyncSession, product: str, e164: str, ip: str |
     if user.memberships:
         await audit(db, actor_type="service", actor_id=None, action="user.product_erased", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
         return "membership_removed"
-    user.phone_enc = user.phone_hash = user.display_name = user.password_hash = user.totp_secret_enc = None
+    user.phone_enc = user.phone_hash = user.email_enc = user.email_hash = user.display_name = user.password_hash = user.totp_secret_enc = None
     user.status = "disabled"
     await audit(db, actor_type="service", actor_id=None, action="user.erased", entity="user", entity_id=user.id, ip=ip, detail={"product": product})
     return "erased"

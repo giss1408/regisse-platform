@@ -17,6 +17,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./conf.d:/etc/caddy/conf.d:ro
+      - ./global.d:/etc/caddy/global.d:ro
       - caddy_data:/data
       - caddy_config:/config
     networks: [infra_net]

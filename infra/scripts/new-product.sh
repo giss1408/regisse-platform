@@ -7,16 +7,43 @@ cd "$(dirname "$0")/.."
 
 name="${1:-}"; shift || true
 [[ "$name" =~ ^[a-z][a-z0-9]{1,24}$ ]] || { echo "name must match ^[a-z][a-z0-9]{1,24}$ (no underscores/hyphens: used in role, db and host names)"; exit 2; }
-postgis=0; upstream="${name}-web:8000"
+postgis=0; upstream="${name}-web:8000"; max_body=""; admin_ips=""; caddy_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --postgis) postgis=1 ;;
     --upstream) upstream="$2"; shift ;;
+    --max-body) max_body="$2"; shift ;;      # e.g. 6MB: Caddy answers 413 above it, before the app sees the body
+    --admin-ips) admin_ips="$2"; shift ;;    # space-separated IPs/CIDRs allowed to open /admin/* (optional; see global.d/cloudflare.caddy.example)
+    --caddy-only) caddy_only=1 ;;            # print the Caddy snippet and exit (no database, no files): for review and tests
     *) echo "unknown arg $1"; exit 2 ;;
   esac; shift
 done
 
 set -a; source .env; set +a
+
+caddy_snippet() {
+  cat <<CADDY
+${SITE_SCHEME:-}${name}-api.${DOMAIN} {
+	encode zstd gzip
+$( [ -n "$max_body" ] && printf '\t# A body whose declared size is over the limit is refused with 413 at once; request_body also cuts off chunked bodies that grow past it.\n\t@too_large expression `{http.request.header.Content-Length}.size() > 0 && int({http.request.header.Content-Length}) > %s`\n\trespond @too_large "Request too large" 413\n\trequest_body {\n\t\tmax_size %s\n\t}\n' "$(python3 -c "import re,sys;m=re.fullmatch(r'(\\d+)\\s*([KMG]?B)',sys.argv[1],re.I);u={'B':1,'KB':1024,'MB':1048576,'GB':1073741824};print(int(m.group(1))*u[m.group(2).upper()])" "$max_body")" "$max_body" )
+	# Private routes (called by the auth service over the private network) are not published on the public hostname.
+	@private path /internal/* /api/internal/*
+	respond @private 404
+$( [ -n "$admin_ips" ] && printf '\t# The low-level admin only from these addresses (client_ip is the real client behind Cloudflare once the trusted ranges are configured).\n\t@admin_blocked {\n\t\tpath /admin/*\n\t\tnot client_ip %s\n\t}\n\trespond @admin_blocked "Forbidden" 403\n' "$admin_ips" )
+	reverse_proxy ${upstream} {
+		health_uri /healthz
+		health_interval 5s
+		health_passes 1
+		health_headers {
+			Host ${name}-api.${DOMAIN}
+			X-Forwarded-Proto https
+		}
+	}
+}
+CADDY
+}
+if [ "$caddy_only" = 1 ]; then caddy_snippet; exit 0; fi
+
 secret="secrets/$name.env"
 [ ! -f "$secret" ] || { echo "product '$name' already exists ($secret)"; exit 1; }
 
@@ -50,23 +77,7 @@ RCLI ACL SETUSER "$name" on ">$rpw" '~*' '&*' '+@all' '-@dangerous' '-@admin' '+
 RCLI ACL SAVE >/dev/null
 
 # Caddy route
-cat > "conf.d/$name.caddy" <<CADDY
-${SITE_SCHEME:-}${name}-api.${DOMAIN} {
-	encode zstd gzip
-	# Private routes (called by the auth service over the private network) are not published on the public hostname.
-	@private path /internal/* /api/internal/*
-	respond @private 404
-	reverse_proxy ${upstream} {
-		health_uri /healthz
-		health_interval 5s
-		health_passes 1
-		health_headers {
-			Host ${name}-api.${DOMAIN}
-			X-Forwarded-Proto https
-		}
-	}
-}
-CADDY
+caddy_snippet > "conf.d/$name.caddy"
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || echo "warning: caddy reload failed (is caddy up?)"
 
 umask 077

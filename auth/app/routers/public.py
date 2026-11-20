@@ -10,7 +10,7 @@ from app.audit import client_ip
 from app.config import get_settings
 from app.db import get_session
 from app.deps import Principal, current_principal, service_caller
-from app.errors import Forbidden, Unauthorized
+from app.errors import BadRequest, Forbidden, Unauthorized
 from app.models import User
 from app.services import accounts
 
@@ -144,18 +144,23 @@ async def delete_me(data: DeleteMeIn, request: Request, p: Principal = Depends(c
 
 
 class EraseForProductIn(BaseModel):
-    phone: str = Field(min_length=6, max_length=32)
+    phone: str | None = Field(default=None, min_length=6, max_length=32)
+    user_id: uuid.UUID | None = None  # a product that keeps no phone number erases by the auth user id
 
 
 @router.post("/service/erase")
 async def service_erase(data: EraseForProductIn, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
     """A product tells auth it erased a person (the self-service deletion or an admin acting on a request): her access to THAT product
     ends, and her identity is erased when nothing else is left. Service key, own product only; staff are refused; idempotent."""
-    try:
-        e164 = accounts.normalize_phone(data.phone)
-    except Exception:
-        return {"result": "unknown"}
-    result = await accounts.erase_for_product(db, caller, e164, client_ip(request))
+    if (data.phone is None) == (data.user_id is None):
+        raise BadRequest("phone_or_user_id")
+    e164 = None
+    if data.phone is not None:
+        try:
+            e164 = accounts.normalize_phone(data.phone)
+        except Exception:
+            return {"result": "unknown"}
+    result = await accounts.erase_for_product(db, caller, e164, client_ip(request), user_id=data.user_id)
     await db.commit()
     return {"result": result}
 
@@ -184,6 +189,36 @@ async def phone_change_confirm(data: PhoneConfirmIn, request: Request, p: Princi
     out = await accounts.confirm_phone_change(db, p, data.code, client_ip(request))
     await db.commit()
     return out
+
+
+class ServiceStaffIn(BaseModel):
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=32)] | None = None
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=254)] | None = None
+    display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+    role: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z_]{1,31}$")]
+
+
+@router.post("/service/staff", status_code=201)
+async def service_staff_create(data: ServiceStaffIn, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
+    """The product's backend adds one of its staff (roles listed in the product's `service_staff_roles` only). The temporary password is
+    returned ONCE, to be handed over in person; the product decides which of its own admins may call this."""
+    out = await accounts.service_create_staff(db, caller, raw_phone=data.phone, raw_email=data.email, display_name=data.display_name, role=data.role, ip=client_ip(request))
+    await db.commit()
+    return out
+
+
+@router.post("/service/staff/{user_id}/reset")
+async def service_staff_reset(user_id: uuid.UUID, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
+    out = await accounts.service_reset_staff(db, caller, user_id, client_ip(request))
+    await db.commit()
+    return out
+
+
+@router.delete("/service/staff/{user_id}")
+async def service_staff_remove(user_id: uuid.UUID, request: Request, caller: str = Depends(service_caller), db: AsyncSession = Depends(get_session)) -> dict:
+    result = await accounts.service_remove_staff(db, caller, user_id, client_ip(request))
+    await db.commit()
+    return {"result": result}
 
 
 @router.get("/me")

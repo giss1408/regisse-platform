@@ -56,7 +56,9 @@ async def current_relay_admin(p: Principal = Depends(current_principal), db: Asy
     """Who may run a product's WhatsApp relay and its number-change reviews: an auth back-office admin (every product), or an admin /
     super admin of THAT product (fidelia's team from the fidelia admin app), signed in with an authenticator code. Product admins are
     scoped: they only see and act on their own product's requests. The membership is re-checked in the database on every call."""
-    if p.role not in ("super_admin", "admin") or "totp" not in p.amr:
+    from app.services import accounts
+
+    if p.role not in accounts.admin_roles(p.product) or "totp" not in p.amr:
         raise Forbidden("admin_only")
     user = await db.get(User, p.user_id)
     if user is None or not any(m.product == p.product and m.role == p.role for m in user.memberships):

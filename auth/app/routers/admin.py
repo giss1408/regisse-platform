@@ -110,7 +110,7 @@ def _guard_scoped_target(admin: Principal, user: User) -> None:
         raise NotFound("user_not_found")
     if any(m.product == "auth" for m in user.memberships):
         raise Forbidden("auth_admin_only")
-    if accounts.is_privileged(user) and admin.role != "super_admin":
+    if accounts.is_privileged(user) and admin.role not in accounts.top_admin_roles(admin.scope):
         raise Forbidden("super_admin_only")
 
 

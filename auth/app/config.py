@@ -30,6 +30,18 @@ DEFAULT_PRODUCTS: dict = {
         "self_register": {"app": "customer", "role": "customer"},
         "totp_roles": ["super_admin", "admin"],
     },
+    # A supermarket platform: customers (phone-first, like the others), a retailer's staff (created by the platform's own backend through
+    # /v1/service/staff when a platform admin adds them), and the platform admin (authenticator code required).
+    "supermarket": {
+        "apps": {"customer": ["customer"], "retailer": ["retailer_staff"], "admin": ["platform_admin"]},
+        "self_register": {"app": "customer", "role": "customer"},
+        "totp_roles": ["platform_admin"],
+        # who runs this product's WhatsApp relay and reviews (see deps.current_relay_admin), and who among them may act on the product's staff
+        "admin_roles": ["platform_admin"],
+        "top_admin_roles": ["platform_admin"],
+        # roles the product's own backend may create, reset and remove through the service endpoints (never its admins)
+        "service_staff_roles": ["retailer_staff"],
+    },
 }
 
 

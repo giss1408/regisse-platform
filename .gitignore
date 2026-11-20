@@ -9,3 +9,5 @@ infra/conf.d/*.caddy
 .venv/
 *.pyc
 infra/e2e-state/
+infra/global.d/*.caddy
+!infra/global.d/.gitkeep
