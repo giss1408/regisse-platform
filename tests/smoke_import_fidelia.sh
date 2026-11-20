@@ -41,5 +41,14 @@ PH=$(python3 -c "import sys,json,base64;t=sys.argv[1].split('.')[1];print(json.l
 [ "$(login "$S" customer | J "['detail']")" = "invalid_credentials" ] && ok "the SMS-era account has no password yet (reset through the relay)" || bad "sms era"
 [ "$(login "$D" customer | J "['detail']")" = "account_blocked" ] && ok "a disabled fidelia account stays disabled" || bad "disabled"
 
+# --- fidelia erased a person: auth drops her access (service key, own product only), idempotent, staff refused
+SVC=$(grep '^AUTH_SERVICE_KEYS_JSON=' "$ROOT/auth/.env.platform" | grep -o '"fidelia": *"[^"]*"' | sed 's/.*: *"\(.*\)"/\1/')
+erase(){ aut -X POST "http://127.0.0.1:$PORT/v1/service/erase" -H 'content-type: application/json' -H "X-Service-Key: $1" -d "{\"phone\":\"$2\"}"; }
+[ "$(erase wrong "$M" | J "['detail']")" = "service_key_required" ] && ok "erase refuses a wrong service key" || bad "erase with a wrong key"
+[ "$(erase "$SVC" "$A" | J "['result']")" = "staff_refused" ] && ok "erase never touches an admin" || bad "erase of staff"
+[ "$(erase "$SVC" "$M" | J "['result']")" = "erased" ] && ok "fidelia's key erases the merchant (fidelia was her only product)" || bad "erase"
+[ "$(login "$M" merchant | J "['detail']")" != "" ] && ok "she can no longer sign in" || bad "still signs in after erase"
+[ "$(erase "$SVC" "$M" | J "['result']")" = "unknown" ] && ok "erasing again is a no-op" || bad "second erase"
+
 PSQL postgres "DROP DATABASE IF EXISTS fidelia_src" >/dev/null
 echo; echo "result: $pass passed, $failn failed"; [ "$failn" -eq 0 ]
