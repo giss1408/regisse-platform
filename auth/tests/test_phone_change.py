@@ -194,7 +194,9 @@ async def test_a_confirmed_change_leaves_a_notice_for_the_old_number_and_the_sta
     notice = _queue(rows, "phone_changed_notice")[0]
     url = (await client.post(f"/v1/admin/relay/{notice['id']}/send", headers=boss)).json()["url"]
     assert "2250701020304" in url  # to the OLD number, although the account's number is now the new one
-    stale = _queue(rows, "phone_change_alert")[0]
+    assert _queue(rows, "phone_change_alert") == []  # the warning left the open queue with the change
+    every = (await client.get("/v1/admin/relay-queue", params={"status": "all"}, headers=boss)).json()
+    stale = _queue(every, "phone_change_alert")[0]
     assert (await client.post(f"/v1/admin/relay/{stale['id']}/send", headers=boss)).status_code == 409
 
 

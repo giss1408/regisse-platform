@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import audit, client_ip
 from app.config import get_settings
 from app.db import get_session
-from app.deps import Principal, current_admin, current_super_admin
+from app.deps import current_relay_admin, require_fresh, Principal, current_admin, current_super_admin
 from app.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.models import Membership, RelayRequest, User
 from app.services import accounts
@@ -32,8 +32,10 @@ class QueueItem(BaseModel):
 
 
 @router.get("/relay-queue", response_model=list[QueueItem])
-async def relay_queue(status: Literal["open", "sent", "all"] = "open", _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)):
+async def relay_queue(status: Literal["open", "sent", "all"] = "open", admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)):
     q = select(RelayRequest).order_by(RelayRequest.created_at)
+    if admin.scope:
+        q = q.where(RelayRequest.product == admin.scope)
     if status != "all":
         q = q.where(RelayRequest.status == status)
     out = []
@@ -45,24 +47,24 @@ async def relay_queue(status: Literal["open", "sent", "all"] = "open", _: Princi
     return out
 
 
-async def _req(db: AsyncSession, request_id: int) -> RelayRequest:
+async def _req(db: AsyncSession, request_id: int, admin: Principal | None = None) -> RelayRequest:
     r = await db.get(RelayRequest, request_id)
-    if r is None:
-        raise NotFound("request_not_found")
+    if r is None or (admin is not None and admin.scope and r.product != admin.scope):
+        raise NotFound("request_not_found")  # another product's request does not exist for a product admin
     return r
 
 
 @router.post("/relay/{request_id}/send")
-async def relay_send(request_id: int, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+async def relay_send(request_id: int, request: Request, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """New code (or temporary password) + wa.me link: the admin sends it from their WhatsApp, the user types it in the app."""
-    url = await accounts.relay_send(db, await _req(db, request_id), admin.user_id, client_ip(request))
+    url = await accounts.relay_send(db, await _req(db, request_id, admin), admin.user_id, client_ip(request))
     await db.commit()
     return {"url": url}
 
 
 @router.post("/relay/{request_id}/reject", status_code=204)
-async def relay_reject(request_id: int, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> None:
-    await accounts.relay_reject(db, await _req(db, request_id), admin.user_id, client_ip(request))
+async def relay_reject(request_id: int, request: Request, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> None:
+    await accounts.relay_reject(db, await _req(db, request_id, admin), admin.user_id, client_ip(request))
     await db.commit()
 
 
@@ -94,35 +96,59 @@ class ActivateNowIn(BaseModel):
     note: str = Field(min_length=10, max_length=300)  # who was called, on which number, what was checked
 
 
+async def _scoped_change(db: AsyncSession, change_id: int, admin: Principal):
+    from app.models import PhoneChange
+
+    pc = await db.get(PhoneChange, change_id)
+    if pc is None or (admin.scope and pc.product != admin.scope):
+        raise NotFound("phone_change_not_found")
+    return pc
+
+
 @router.get("/phone-changes")
-async def phone_changes(status: Literal["scheduled", "requested", "all"] = "scheduled", _: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> list[dict]:
-    """Number changes waiting for their delay (or for the code): who, which product, when they take effect."""
+async def phone_changes(status: Literal["open", "scheduled", "requested", "all"] = "open", admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> list[dict]:
+    """Number changes to follow: `open` = waiting for the code or for their delay, or done with a notice still to send. For each, the relay
+    messages that can still be sent (`relays`: code to the NEW number, warning / notice to the OLD number)."""
     from app.models import PhoneChange
 
     q = select(PhoneChange).order_by(PhoneChange.created_at)
-    if status != "all":
+    if admin.scope:
+        q = q.where(PhoneChange.product == admin.scope)
+    if status in ("scheduled", "requested"):
         q = q.where(PhoneChange.status == status)
     out = []
-    for pc in (await db.scalars(q.limit(200))).all():
+    for pc in (await db.scalars(q.limit(300))).all():
+        relays = {}
+        for r in (await db.scalars(select(RelayRequest).where(RelayRequest.ref_id == pc.id, RelayRequest.status.in_(["open", "sent"]),
+                                                              RelayRequest.purpose.in_(["phone_change", "phone_change_alert", "phone_changed_notice"])))).all():
+            relays[{"phone_change": "code", "phone_change_alert": "alert", "phone_changed_notice": "notice"}[r.purpose]] = {"id": r.id, "status": r.status}
+        if status == "open" and pc.status not in ("requested", "scheduled") and not (pc.status == "done" and "notice" in relays):
+            continue
         u = await db.get(User, pc.user_id)
         out.append({"id": pc.id, "product": pc.product, "status": pc.status, "display_name": u.display_name if u else None,
                     "new_phone_masked": accounts.kit_phone.mask_phone(accounts.cipher().decrypt(pc.new_phone_enc)),
-                    "effective_at": pc.effective_at.isoformat() + "Z" if pc.effective_at else None, "user_id": str(pc.user_id)})
+                    "old_phone_masked": accounts.kit_phone.mask_phone(accounts.cipher().decrypt(pc.old_phone_enc)) if pc.old_phone_enc else None,
+                    "created_at": pc.created_at.isoformat() + "Z", "effective_at": pc.effective_at.isoformat() + "Z" if pc.effective_at else None,
+                    "relays": relays, "user_id": str(pc.user_id)})
     return out
 
 
 @router.post("/phone-changes/{change_id}/activate-now")
-async def phone_change_activate_now(change_id: int, data: ActivateNowIn, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+async def phone_change_activate_now(change_id: int, data: ActivateNowIn, request: Request, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """After calling the person on the number she was using: the scheduled change takes effect now. A written note is required and kept in the audit."""
+    require_fresh(admin)  # password + a recent authenticator code, again: this changes who owns an account
+    await _scoped_change(db, change_id, admin)
     masked = await accounts.phone_change_activate_now(db, change_id, admin.user_id, data.note, client_ip(request))
     await db.commit()
     return {"status": "done", "phone_masked": masked}
 
 
 @router.post("/phone-changes/{change_id}/not-me")
-async def phone_change_not_me(change_id: int, request: Request, admin: Principal = Depends(current_admin), db: AsyncSession = Depends(get_session)) -> dict:
+async def phone_change_not_me(change_id: int, request: Request, admin: Principal = Depends(current_relay_admin), db: AsyncSession = Depends(get_session)) -> dict:
     """"This wasn't me" on a number change (reported by WhatsApp reply or a call): cancels a pending request or puts a confirmed change back,
     freezes the account and ends its sessions. Re-enable it (`/users/{id}/enable`) after calling the person."""
+    require_fresh(admin)
+    await _scoped_change(db, change_id, admin)
     out = await accounts.phone_change_not_me(db, change_id, admin.user_id, client_ip(request))
     await db.commit()
     return out

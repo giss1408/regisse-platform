@@ -316,6 +316,8 @@ async def _apply_phone_change(db: AsyncSession, user: User, pc: PhoneChange, now
     await db.execute(delete(CodeChallenge).where(CodeChallenge.user_id == user.id, CodeChallenge.purpose == "phone_change"))
     await db.execute(update(RelayRequest).where(RelayRequest.user_id == user.id, RelayRequest.purpose == "phone_change", RelayRequest.status.in_(["open", "sent"])).values(status="done"))
     await db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None), RefreshToken.family != (keep_sid or "")).values(revoked_at=now))
+    # the warning to the old number is stale now (the notice replaces it): close it so it leaves the queue
+    await db.execute(update(RelayRequest).where(RelayRequest.ref_id == pc.id, RelayRequest.purpose == "phone_change_alert", RelayRequest.status.in_(["open", "sent"])).values(status="rejected"))
     db.add(RelayRequest(user_id=user.id, product=pc.product, purpose="phone_changed_notice", ref_id=pc.id))
     detail = {"note": note} if note else None
     await audit(db, actor_type=actor[0], actor_id=actor[1] or user.id, action="user.phone_changed", entity="user", entity_id=user.id, ip=ip, detail=detail)
