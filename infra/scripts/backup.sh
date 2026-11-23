@@ -3,6 +3,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; source .env; set +a
+# Production-like host (SITE_SCHEME empty = real TLS, see .env.example): a plain local dump is not a backup. Encryption and an off-host
+# copy are mandatory there, and the job fails loudly (so the heartbeat stops and the alert fires) instead of "succeeding" with a local file.
+if [ -z "${SITE_SCHEME:-}" ] && [ "${BACKUP_ALLOW_LOCAL_ONLY:-0}" != "1" ]; then
+  [ -n "${AGE_RECIPIENT:-}" ] || { echo "refusing: AGE_RECIPIENT is not set (backups must be encrypted on a production host)" >&2; exit 2; }
+  [ -n "${RCLONE_REMOTE:-}" ] || { echo "refusing: RCLONE_REMOTE is not set (backups must be copied off the host)" >&2; exit 2; }
+fi
 BACKUP_DIR="${BACKUP_DIR:-./backups}"; keep="${BACKUP_KEEP_DAYS:-30}"
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 dbs=$(docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres psql -U postgres -Atc "select datname from pg_database where datname like 'db\_%' escape '\\'")

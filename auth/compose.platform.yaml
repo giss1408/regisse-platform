@@ -10,6 +10,12 @@ services:
     image: auth-backend:local
     container_name: auth-web
     env_file: .env.platform
+    # Hardening: nothing writable but /tmp, no capabilities, no privilege gain, bounded process count.
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     restart: unless-stopped
     networks: [infra_net]
     mem_limit: 384m
@@ -27,6 +33,12 @@ services:
     container_name: auth-scheduler
     env_file: .env.platform
     command: ["python", "-m", "app.cli", "run-scheduler"]
+    # Hardening: nothing writable but /tmp, no capabilities, no privilege gain, bounded process count.
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     restart: unless-stopped
     networks: [infra_net]
     mem_limit: 192m

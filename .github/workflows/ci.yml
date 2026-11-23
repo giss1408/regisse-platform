@@ -1,0 +1,70 @@
+name: platform-ci
+on:
+  push: {branches: [main]}
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e "kit[dev]"
+      - run: cd kit && python -m pytest -q
+
+  auth:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: {POSTGRES_USER: auth, POSTGRES_PASSWORD: auth, POSTGRES_DB: auth}
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U auth" --health-interval 5s --health-retries 10
+        # the tests connect to localhost:5434 (see auth/Makefile); the container itself listens on 5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r auth/requirements.txt -r auth/requirements-dev.txt ./kit
+      - run: cd auth && python -m pytest -q
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Known vulnerabilities in pinned dependencies
+        run: pip install pip-audit && pip-audit -r auth/requirements.txt --strict
+      - name: Build the auth image
+        run: docker build -t auth-backend:ci --build-context kit=kit auth
+      - name: Image scan (HIGH and CRITICAL fail the build)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: auth-backend:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell scripts parse
+        run: for f in infra/scripts/*.sh infra/tests/*.sh; do bash -n "$f"; done
+      - name: Compose files are valid
+        run: |
+          touch infra/monitoring/.env
+          MONITOR_DB_PASSWORD=x MONITOR_REDIS_PASSWORD=x docker compose -f infra/monitoring/compose.yaml config -q
+          POSTGRES_PASSWORD=x REDIS_ADMIN_PASSWORD=x docker compose -f infra/compose.yaml config -q
+      - name: Alloy config parses
+        run: docker run --rm -v "$PWD/infra/monitoring/config.alloy:/c.alloy:ro" grafana/alloy:v1.10.2 fmt /c.alloy > /dev/null
+      - name: Alert rules are valid YAML
+        run: python3 -c "import yaml,sys; yaml.safe_load(open('infra/monitoring/alerts.yaml'))" || (pip install pyyaml && python3 -c "import yaml; yaml.safe_load(open('infra/monitoring/alerts.yaml'))")
+      - name: No secrets tracked
+        run: "! git ls-files | grep -E '(^|/)(\\.env|.*\\.generated\\.env)$|infra/secrets/.*\\.env$'"

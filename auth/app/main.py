@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
+from regisse_kit.headers import install_security_headers
 from regisse_kit.health import health_router
 from regisse_kit.observability import install_observability
 from sqlalchemy import text
@@ -30,17 +31,7 @@ def create_app() -> FastAPI:
     prod = s.env == "prod"
     app = FastAPI(title="regisse auth", version="0.1.0", lifespan=lifespan, docs_url=None if prod else "/docs", redoc_url=None, openapi_url=None if prod else "/openapi.json")
 
-    @app.middleware("http")
-    async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
-        response: Response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Cache-Control", "no-store")
-        if prod:
-            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-        return response
-
+    install_security_headers(app, prod=prod)
     install_observability(app, "auth", metrics_token=s.metrics_token or None)
     install_error_handlers(app)
     app.include_router(health_router({"db": _check_db}))

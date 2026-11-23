@@ -1,8 +1,9 @@
+import base64
 import json
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from regisse_kit.db_url import to_asyncpg_url
 
@@ -92,6 +93,42 @@ class Settings(BaseSettings):
     @classmethod
     def _asyncpg(cls, v: str) -> str:
         return to_asyncpg_url(v)
+
+    @model_validator(mode="after")
+    def _fail_closed_outside_dev(self) -> "Settings":
+        """prod and staging refuse to start on dev defaults or weak secrets (all problems reported at once). The issuer and test-number rules are
+        prod only: the local rehearsal stack runs as staging on http://localhost."""
+        if self.env not in ("prod", "staging"):
+            return self
+        bad: list[str] = []
+        if self.env == "prod" and (not self.issuer.startswith("https://") or "localhost" in self.issuer):
+            bad.append("issuer must be a public https URL")
+        if "auth:auth@" in self.database_url or "localhost" in self.database_url:
+            bad.append("database_url still has dev defaults")
+        if not self.rate_limit_storage.startswith("redis"):
+            bad.append("rate_limit_storage must be redis (memory is per process and lost on restart)")
+        if self.trusted_proxy_hops < 1:
+            bad.append("trusted_proxy_hops must be >= 1 (behind Caddy/Cloudflare); 0 trusts the proxy address as the client")
+        keys = {}
+        for name in ("field_encryption_key", "hash_key"):
+            try:
+                raw = base64.b64decode(getattr(self, name), validate=True)
+            except Exception:  # noqa: BLE001
+                raw = b""
+            if len(raw) != 32 or len(set(raw)) < 8:
+                bad.append(f"{name} must be 32 random bytes in base64")
+            keys[name] = raw
+        if keys["field_encryption_key"] == keys["hash_key"]:
+            bad.append("hash_key must differ from field_encryption_key")
+        if self.metrics_token and len(self.metrics_token) < 32:
+            bad.append("metrics_token must be at least 32 characters")
+        if any(len(k) < 32 for k in self.service_keys.values()):
+            bad.append("every service key (service_keys_json) must be at least 32 characters")
+        if self.env == "prod" and self.allow_test_numbers:
+            bad.append("allow_test_numbers must not be on")
+        if bad:
+            raise ValueError("unsafe " + self.env + " configuration: " + "; ".join(bad))
+        return self
 
     @property
     def test_numbers_ok(self) -> bool:
