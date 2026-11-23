@@ -178,7 +178,7 @@ check("the teacher's own week shows her reason", [x.get("reason") for x in sco.g
 c2 = sco.post(cx, headers=th, json={"on_date": mon2.isoformat(), "reason": "formation"})
 check("she restores a session she cancelled", c2.status_code == 201 and sco.delete(f"{cx}/{mon2.isoformat()}", headers=th).status_code == 200 and len(sco.get("/v1/timetable/cancellations", headers=d).json()) == 1)
 # ---- the school lets Scolaris message families; the teacher calls the roll DURING her course
-check("the director switches automatic WhatsApp on", sco.put("/v1/school/settings", headers=d, json={"auto_whatsapp": True}).json() == {"auto_whatsapp": True})
+check("the director switches automatic WhatsApp on", sco.put("/v1/school/settings", headers=d, json={"auto_whatsapp": True}).json()["auto_whatsapp"] is True)
 today = date.today()
 roll_ok = today.isoweekday() != 7
 if roll_ok:
@@ -194,6 +194,28 @@ if roll_ok:
     logd = sco.get("/v1/messages", headers=d).json()
     check("the family had no WhatsApp opt-in: the message is listed as 'to phone', nothing was sent",
           [(m["kind"], m["status"], m["needs_call"]) for m in logd["items"]] == [("absence", "skipped", True)] and "au cours de Mathématiques" in logd["items"][0]["text"], logd)
+
+# ---- the school's OWN WhatsApp number: the app composes, the secretary forwards, replies come to the school
+if roll_ok:
+    check("the director enters the school's own WhatsApp number and switches the automatic sending off",
+          sco.put("/v1/school/settings", headers=d, json={"whatsapp_phone": "07 05 06 07 08", "auto_whatsapp": False}).json() == {"auto_whatsapp": False, "whatsapp_phone": "+2250705060708"})
+    parent2 = "01%08d" % random.randint(10000000, 99999999)
+    p2 = sco.post("/v1/students", headers=d, json={"last_name": "Soro", "first_names": "Awa", "sex": "F", "enrollment": {"classroom_id": room["id"]},
+                                                   "contacts": [{"name": "Soro Ali", "relation": "pere", "phone": parent2, "whatsapp_optin": True, "financial_responsible": True}]})
+    check("a pupil whose parent agreed to WhatsApp is enrolled", p2.status_code == 201, p2.text)
+    enr2 = p2.json()["enrollment_id"]
+    r2 = sco.put(f"/v1/timetable/slots/{rid}/roll", headers=th, json={"on_date": today.isoformat(), "entries": [{"enrollment_id": enr, "kind": "absence"}, {"enrollment_id": enr2, "kind": "absence"}]})
+    check("the teacher notes her absent during the course: ONE new parent is to be told (the first was told before)", r2.status_code == 200 and r2.json()["notified"] == 1, r2.text)
+    ts = sco.get("/v1/messages/to-send", headers=d).json()
+    check("the message waits for the secretary, with the school's number to send from", ts["school_phone"] == "+2250705060708" and len(ts["items"]) == 1 and ts["items"][0]["family"] == "SORO", ts)
+    link = ts["items"][0]["wa_link"]
+    check("one tap opens WhatsApp on the PARENT's number with the text ready", link.startswith("https://wa.me/225" + parent2[-10:]) and "text=" in link and "Awa" in ts["items"][0]["text"], link)
+    check("the count of waiting messages is in the profile", sco.get("/v1/me", headers=d).json()["school"]["messages_to_send"] == 1)
+    mid = ts["items"][0]["id"]
+    check("forwarded once, a second tap changes nothing", sco.post(f"/v1/messages/{mid}/sent", headers=d).json()["changed"] is True and sco.post(f"/v1/messages/{mid}/sent", headers=d).json()["changed"] is False)
+    check("a teacher has no access to the messages", sco.get("/v1/messages/to-send", headers=th).status_code == 403)
+    cid = sco.get(f"/v1/students/{p2.json()['id']}", headers=d).json()["contacts"][0]["id"]
+    check("a parent who says stop: her consent is withdrawn", sco.put(f"/v1/contacts/{cid}/optin", headers=d, json={"whatsapp_optin": False}).json()["whatsapp_optin"] is False)
 
 # ---- a replacement teacher for the cancelled session
 tp2 = "07%08d" % random.randint(10000000, 99999999)
@@ -253,6 +275,14 @@ pay1 = sco.post(P + "/payments", headers=adm, json={"amount": 50000, "method": "
 check("a payment is recorded and the oldest instalment is paid first", pay1.status_code == 201 and pay1.json()["standing"]["remaining"] == st.json()["remaining"] - 50000, pay1.text)
 check("the platform audit keeps what the team did", {"subscription.set", "notice.reminder", "notice.final_notice", "subscription.payment"} <= {a["action"] for a in sco.get(f"/v1/platform/audit?school_id={sid_school}", headers=adm).json()})
 
+# ---- where schools pay their subscription (set by the Scolaris team)
+check("a school cannot change where payments go", sco.put("/v1/platform/payment-info", headers=d, json={"methods": [], "default_monthly_amount": 1}).json()["detail"] == "not_platform_admin")
+pi = sco.put("/v1/platform/payment-info", headers=adm, json={"methods": [{"operator": "wave", "number": "07 11 22 33 44", "holder": "Scolaris SARL"}, {"operator": "orange_money", "number": "05 11 22 33 44", "holder": "Scolaris SARL"}], "default_monthly_amount": 30000, "note": "Indiquez la référence"})
+check("the team enters the Mobile Money numbers and the usual price (password re-proved)", pi.status_code == 200 and pi.json()["default_monthly_amount"] == 30000 and pi.json()["methods"][0]["number"] == "+2250711223344", pi.text)
+pt = sco.get("/v1/billing", headers=d).json()["pay_to"]
+check("the director sees where to pay, the reference and the amount owed", [m["operator"] for m in pt["methods"]] == ["wave", "orange_money"] and pt["reference"] == f"SCO-{sid_school}" and pt["amount"] > 0 and pt["note"] == "Indiquez la référence", pt)
+check("the audit keeps the change with masked numbers", any(a["action"] == "payment_info.set" and "0711223344" not in str(a) for a in sco.get("/v1/platform/audit", headers=adm).json()))
+
 # ---- the WhatsApp webhook is public but verified
 check("the webhook refuses an unsigned post and a wrong handshake", sco.post("/webhooks/whatsapp", content=b"{}").status_code == 403 and sco.get("/webhooks/whatsapp", params={"hub.mode": "subscribe", "hub.verify_token": "x", "hub.challenge": "1"}).status_code == 403)
 sco.put(f"/v1/classrooms/{room['id']}/teachers", headers=d, json={"head_teacher_id": None, "assignments": []})
@@ -281,6 +311,6 @@ if roll_ok:
 check("she gets the logo of her child's school and only that", sco.get(f"/v1/parent/schools/{sid_school}/logo", headers=ph).content == logo and sco.get(f"/v1/parent/schools/{sid_school + 9999}/logo", headers=ph).status_code == 404)
 check("a parent token is refused by the staff routes", sco.get("/v1/me", headers=ph).status_code == 403 and sco.get(f"/v1/arrears?year_id={year}", headers=ph).status_code == 403)
 check("she reads the report card of her child", sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/report-card?period=1", headers=ph).json()["average"] == "15.50")
-check("the director's exports work", sco.get(f"/v1/exports/headcount?year_id={year}", headers=d).json()["total"]["total"] == 1 and sco.get(f"/v1/exports/headcount?year_id={year}&format=csv", headers=d).text.lstrip("\ufeff").startswith("Niveau;"))
+check("the director's exports work", sco.get(f"/v1/exports/headcount?year_id={year}", headers=d).json()["total"]["total"] == (2 if roll_ok else 1) and sco.get(f"/v1/exports/headcount?year_id={year}&format=csv", headers=d).text.lstrip("\ufeff").startswith("Niveau;"))
 print(f"\n{ok} passed, {fail} failed (part 2)")
 sys.exit(1 if fail else 0)
