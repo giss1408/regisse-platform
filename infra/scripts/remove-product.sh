@@ -11,4 +11,8 @@ docker compose exec -T redis redis-cli --no-auth-warning -a "$REDIS_ADMIN_PASSWO
 docker compose exec -T redis redis-cli --no-auth-warning -a "$REDIS_ADMIN_PASSWORD" ACL SAVE >/dev/null || true
 rm -f "conf.d/$name.caddy" "secrets/$name.env"
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+if docker network inspect "net_$name" >/dev/null 2>&1; then
+  for c in $(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "net_$name"); do docker network disconnect -f "net_$name" "$c" >/dev/null 2>&1 || true; done
+  docker network rm "net_$name" >/dev/null 2>&1 || true
+fi
 echo "removed product '$name'"

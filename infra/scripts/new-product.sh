@@ -7,13 +7,14 @@ cd "$(dirname "$0")/.."
 
 name="${1:-}"; shift || true
 [[ "$name" =~ ^[a-z][a-z0-9]{1,24}$ ]] || { echo "name must match ^[a-z][a-z0-9]{1,24}$ (no underscores/hyphens: used in role, db and host names)"; exit 2; }
-postgis=0; upstream="${name}-web:8000"; max_body=""; admin_ips=""; caddy_only=0
+isolated=0; postgis=0; upstream="${name}-web:8000"; max_body=""; admin_ips=""; caddy_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --postgis) postgis=1 ;;
     --upstream) upstream="$2"; shift ;;
     --max-body) max_body="$2"; shift ;;      # e.g. 6MB: Caddy answers 413 above it, before the app sees the body
     --admin-ips) admin_ips="$2"; shift ;;    # space-separated IPs/CIDRs allowed to open /admin/* (optional; see servers.d/cloudflare.caddy.example)
+    --isolated) isolated=1 ;;                # own Docker network net_<name>; the shared services are attached to it (see scripts/connect-nets.sh)
     --caddy-only) caddy_only=1 ;;            # print the Caddy snippet and exit (no database, no files): for review and tests
     *) echo "unknown arg $1"; exit 2 ;;
   esac; shift
@@ -87,5 +88,10 @@ DATABASE_URL=postgresql://$role:$pw@postgres:5432/$dbname
 REDIS_URL=redis://$name:$rpw@redis:6379/$idx
 PUBLIC_HOST=${name}-api.${DOMAIN}
 ENV
+if [ "$isolated" = 1 ]; then
+  docker network create --label com.regisse.product="$name" "net_$name" >/dev/null
+  scripts/connect-nets.sh
+  echo "isolated: put the product's containers on the external network net_$name ONLY (not infra_net) in its compose file"
+fi
 echo "product '$name' ready: db=$dbname role=$role redis_db=$idx host=${name}-api.${DOMAIN} upstream=$upstream"
 echo "secrets: infra/$secret (copy into the product's .env)"

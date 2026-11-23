@@ -60,6 +60,8 @@ jobs:
           touch infra/monitoring/.env
           MONITOR_DB_PASSWORD=x MONITOR_REDIS_PASSWORD=x docker compose -f infra/monitoring/compose.yaml config -q
           POSTGRES_PASSWORD=x REDIS_ADMIN_PASSWORD=x docker compose -f infra/compose.yaml config -q
+      - name: Product network isolation (stand-in containers)
+        run: infra/tests/isolation.sh
       - name: Caddy config is valid (with and without the Cloudflare snippet)
         run: |
           mkdir -p /tmp/cd/global.d /tmp/cd/servers.d /tmp/cd/conf.d
