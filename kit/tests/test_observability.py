@@ -90,3 +90,26 @@ async def test_security_event_counter(app):
     security_event("demo", "login_failed")
     r = await get(app, "/metrics", headers={"authorization": "Bearer s3cret"})
     assert 'security_events_total{event="login_failed",service="demo"} 2.0' in r.text
+
+
+def test_redacting_filter_masks_message_extras_and_exceptions():
+    from regisse_kit.redact import RedactingFilter
+
+    class Grab(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append(logging.Formatter("%(message)s|%(exc_text)s").format(record) if record.exc_text else record.getMessage())
+
+    log = logging.getLogger("redact-test")
+    log.propagate, grab = False, Grab()
+    grab.addFilter(RedactingFilter())
+    log.addHandler(grab)
+    try:
+        raise ValueError("failed for +2250701020304")
+    except ValueError:
+        log.error("sms to %s", "0701020304", exc_info=True, extra={"password": "hunter2", "route": "/x"})
+    out = grab.lines[0]
+    assert "0701020304" not in out and "hunter2" not in out and "[phone]" in out

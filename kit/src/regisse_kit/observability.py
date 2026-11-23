@@ -19,22 +19,14 @@ import time
 import uuid
 from typing import Any
 
+from .redact import REDACTED, redact, secret_key as _secret_key  # noqa: F401  (re-exported: redact lives in regisse_kit.redact)
+
 try:
     from fastapi import FastAPI, Request, Response
     from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 except ImportError as exc:  # pragma: no cover
     raise ImportError("regisse_kit.observability needs the 'observability' extra: pip install regisse-kit[observability]") from exc
 
-REDACTED = "[redacted]"
-_SECRET_KEY = re.compile(r"(password|passwd|secret|token|authorization|cookie|api[_-]?key|otp)|(^|_)code$", re.I)
-_NOT_SECRET_KEYS = {"status_code", "error_code"}
-_PATTERNS = [
-    (re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+"), REDACTED),  # JWT
-    (re.compile(r"(?i)bearer\s+\S+"), "Bearer " + REDACTED),
-    (re.compile(r"\+\d{8,15}"), "[phone]"),  # international
-    (re.compile(r"(?<!\d)225\d{10}(?!\d)"), "[phone]"),  # CI, no plus
-    (re.compile(r"(?<!\d)0\d{9}(?!\d)"), "[phone]"),  # CI local
-]
 _STD_ATTRS = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {"message", "asctime"}
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -42,23 +34,6 @@ HTTP_REQUESTS = Counter("http_requests_total", "HTTP requests", ["service", "met
 HTTP_LATENCY = Histogram("http_request_duration_seconds", "HTTP request latency", ["service", "method", "route"],
                          buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10))
 SECURITY_EVENTS = Counter("security_events_total", "Security-relevant events", ["service", "event"])
-
-
-def redact(value: Any) -> Any:
-    if isinstance(value, str):
-        for pattern, repl in _PATTERNS:
-            value = pattern.sub(repl, value)
-        return value
-    if isinstance(value, dict):
-        return {k: (REDACTED if _secret_key(k) else redact(v)) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [redact(v) for v in value]
-    return value
-
-
-def _secret_key(key: object) -> bool:
-    k = str(key)
-    return k not in _NOT_SECRET_KEYS and bool(_SECRET_KEY.search(k))
 
 
 class JsonRedactingFormatter(logging.Formatter):
