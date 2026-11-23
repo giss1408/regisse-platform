@@ -84,3 +84,14 @@ groups:
         for: 10m
         labels: {severity: page}
         annotations: {summary: "Fidelia: more than 20% of sign-in SMS fail to send (nobody can sign in)"}
+  - name: scolaris-security
+    rules:
+      - alert: ScolarisMoneyActionsDenied
+        # step-up missing, or the auth session already ended: a stolen or stale token trying to cancel a payment or grant a discount
+        expr: sum(increase(security_events_total{service="scolaris",event=~"403_(step_up_required|session_ended)"}[15m])) > 10
+        labels: {severity: warn}
+        annotations: {summary: "Scolaris: repeated denied money actions (cancel / discount) in 15 min"}
+      - alert: ScolarisWrongRoleOrApp
+        expr: sum(increase(security_events_total{service="scolaris",event=~"403_(wrong_app|forbidden_role|director_only|not_your_evaluation)"}[15m])) > 30
+        labels: {severity: warn}
+        annotations: {summary: "Scolaris: many role or app denials (someone probing what their account can do)"}

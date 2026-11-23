@@ -40,6 +40,15 @@ prometheus.scrape "supermarket" {
   forward_to      = [prometheus.remote_write.cloud.receiver]
 }
 
+// Scolaris (FastAPI, kit adapter): same shape as auth.
+prometheus.scrape "scolaris" {
+  targets         = [{ __address__ = "scolaris-web:8000", job = "scolaris" }]
+  metrics_path    = "/metrics"
+  bearer_token    = sys.env("SCOLARIS_METRICS_TOKEN")
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
 prometheus.scrape "postgres" {
   targets    = [{ __address__ = "postgres-exporter:9187", job = "postgres" }]
   forward_to = [prometheus.remote_write.cloud.receiver]
