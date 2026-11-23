@@ -147,8 +147,21 @@ check("she creates a maths evaluation but not a French one", sco.post("/v1/evalu
       and sco.post("/v1/evaluations", headers=th, json={"classroom_id": room["id"], "subject_id": fr, "period": 1, "kind": "devoir"}).json()["detail"] == "not_your_subject")
 check("as head teacher she writes conduct, but not the council's decision", sco.put(f"/v1/enrollments/{enr}/remarks", headers=th, json={"period": 1, "conduct": "16"}).status_code == 200
       and sco.put(f"/v1/enrollments/{enr}/remarks", headers=th, json={"period": 3, "decision": "passage"}).json()["detail"] == "director_only")
+# ---- timetable
+tid = made.json()["id"]
+base = f"/v1/classrooms/{room['id']}/timetable/slots"
+p1 = sco.post(base, headers=d, json={"weekday": 1, "start": "08:00", "end": "09:00", "subject_id": mt, "teacher_id": tid, "room": "A1"})
+check("the director plans a maths period with the assigned teacher", p1.status_code == 201 and p1.json()["teacher"] == "Prof E2E", p1.text)
+clash = sco.post(base, headers=d, json={"weekday": 1, "start": "08:30", "end": "09:30", "subject_id": fr})
+check("an overlapping period is refused with a sentence naming the clash", clash.status_code == 409 and clash.json()["detail"] == "class_overlap" and "08:00" in clash.json()["message"], clash.text)
+check("a teacher cannot be put on a subject she was not assigned", sco.post(base, headers=d, json={"weekday": 2, "start": "08:00", "end": "09:00", "subject_id": fr, "teacher_id": tid}).json()["detail"] == "teacher_not_assigned")
+tt = sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=th).json()
+check("the teacher reads the class timetable but cannot edit it", tt["editable"] is False and len(tt["slots"]) == 1 and sco.post(base, headers=th, json={"weekday": 3, "start": "08:00", "end": "09:00", "subject_id": mt}).status_code == 403, tt)
+check("her own week lists the period", [(x["weekday"], x["start"], x["classroom"]) for x in sco.get("/v1/timetable/me", headers=th).json()["slots"]] == [(1, "08:00", "CM2 A")])
 sco.put(f"/v1/classrooms/{room['id']}/teachers", headers=d, json={"head_teacher_id": None, "assignments": []})
 check("when the director removes her, the class is closed to her again", sco.get(f"/v1/classrooms/{room['id']}/results?period=1", headers=th).json()["detail"] == "not_your_class")
+after = sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=d).json()["slots"]
+check("her period stays in the timetable, now without a teacher", [(x["subject"], x["teacher"]) for x in after] == [("Mathématiques", None)], after)
 # ---- parent space (slice 4): she signs up herself at auth, the team sends the code, she sees HER child only
 pp = os.environ["PARENT_PHONE"]
 r = auth.post("/v1/register", json={"phone": pp, "password": PW, "display_name": "Traoré Moussa", "product": "scolaris", "consent": True})
@@ -159,6 +172,7 @@ check("she signs in at auth in the parent app", s2 == 200 and ptok["role"] == "p
 ph = H(ptok["access_token"])
 kids = sco.get("/v1/parent/children", headers=ph).json()
 check("scolaris shows her child by her verified phone number", [k["name"] for k in kids] == ["Fanta TRAORÉ"] and kids[0]["balance"]["total_due"] == 85000, kids)
+check("she reads the timetable of her child's class", [x["subject"] for x in sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/timetable", headers=ph).json()["slots"]] == ["Mathématiques"])
 check("a parent token is refused by the staff routes", sco.get("/v1/me", headers=ph).status_code == 403 and sco.get(f"/v1/arrears?year_id={year}", headers=ph).status_code == 403)
 check("she reads the report card of her child", sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/report-card?period=1", headers=ph).json()["average"] == "15.50")
 check("the director's exports work", sco.get(f"/v1/exports/headcount?year_id={year}", headers=d).json()["total"]["total"] == 1 and sco.get(f"/v1/exports/headcount?year_id={year}&format=csv", headers=d).text.lstrip("\ufeff").startswith("Niveau;"))
