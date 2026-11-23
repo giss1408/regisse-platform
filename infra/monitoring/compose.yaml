@@ -1,0 +1,71 @@
+name: monitoring
+
+# Monitoring agent stack: scrapes metrics and collects logs on this host and ships them to Grafana Cloud (managed).
+# Nothing here publishes a port. Exporters are reachable only on infra_net, and only by the agent.
+# Credentials: monitoring/.env (gitignored), see .env.example. Start with `make monitoring-up` after `scripts/make-monitoring.sh`.
+
+x-hardened: &hardened
+  restart: unless-stopped
+  networks: [infra_net]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+services:
+  alloy:
+    <<: *hardened
+    image: grafana/alloy:v1.10.2
+    command: ["run", "--server.http.listen-addr=127.0.0.1:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    env_file: .env
+    environment:
+      HOSTNAME_LABEL: ${HOSTNAME_LABEL:-regisse-prod}
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # read-only container discovery for logs; the one sensitive mount, see README
+    mem_limit: 384m
+    cpus: 0.5
+
+  postgres-exporter:
+    <<: *hardened
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      DATA_SOURCE_NAME: postgresql://monitor:${MONITOR_DB_PASSWORD:?run scripts/make-monitoring.sh}@postgres:5432/postgres?sslmode=disable
+    read_only: true
+    mem_limit: 64m
+
+  redis-exporter:
+    <<: *hardened
+    image: oliver006/redis_exporter:v1.74.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_USER: monitor
+      REDIS_PASSWORD: ${MONITOR_REDIS_PASSWORD:?run scripts/make-monitoring.sh}
+    read_only: true
+    mem_limit: 64m
+
+  cadvisor:
+    <<: *hardened
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    command: ["--docker_only=true", "--housekeeping_interval=30s", "--store_container_labels=false", "--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service"]
+    cap_drop: []   # cAdvisor reads cgroups of the host: it needs its defaults
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    mem_limit: 192m
+
+  node-exporter:
+    <<: *hardened
+    image: prom/node-exporter:v1.9.1
+    command: ["--path.rootfs=/host", "--collector.disable-defaults", "--collector.cpu", "--collector.meminfo", "--collector.filesystem", "--collector.loadavg", "--collector.diskstats", "--collector.netdev", "--collector.time"]
+    volumes:
+      - /:/host:ro,rslave
+    mem_limit: 64m
+
+networks:
+  infra_net:
+    external: true
+
+volumes:
+  alloy_data:

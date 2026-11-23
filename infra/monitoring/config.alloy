@@ -1,0 +1,108 @@
+// Grafana Alloy: scrape on the private network, redact logs, ship to Grafana Cloud.
+// Secrets come from the environment (monitoring/.env), never from this file.
+
+prometheus.remote_write "cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_PROMETHEUS_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_PROMETHEUS_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+  external_labels = { host = sys.env("HOSTNAME_LABEL") }
+}
+
+// Product APIs: /metrics (bearer token) on the container, never through Caddy. Add one block per product that installs regisse_kit.observability.
+prometheus.scrape "auth" {
+  targets         = [{ __address__ = "auth-web:8000", job = "auth" }]
+  metrics_path    = "/metrics"
+  bearer_token    = sys.env("AUTH_METRICS_TOKEN")
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.scrape "postgres" {
+  targets    = [{ __address__ = "postgres-exporter:9187", job = "postgres" }]
+  forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.scrape "redis" {
+  targets    = [{ __address__ = "redis-exporter:9121", job = "redis" }]
+  forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.scrape "node" {
+  targets    = [{ __address__ = "node-exporter:9100", job = "node" }]
+  forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+prometheus.scrape "containers" {
+  targets    = [{ __address__ = "cadvisor:8080", job = "containers" }]
+  forward_to = [prometheus.relabel.drop_noise.receiver]
+}
+
+// cAdvisor emits a lot of series: keep only what the alerts and dashboards use.
+prometheus.relabel "drop_noise" {
+  forward_to = [prometheus.remote_write.cloud.receiver]
+  rule {
+    source_labels = ["__name__"]
+    regex         = "container_(cpu_usage_seconds_total|memory_working_set_bytes|oom_events_total|last_seen|fs_usage_bytes|network_(receive|transmit)_bytes_total)"
+    action        = "keep"
+  }
+}
+
+// Logs: container stdout of the platform, JSON already redacted by regisse_kit. The stage below is a second, independent layer
+// (defense in depth): anything that still looks like a phone, JWT or bearer token is masked before it leaves the host.
+discovery.docker "platform" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "platform" {
+  targets = discovery.docker.platform.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+loki.source.docker "platform" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.platform.output
+  forward_to = [loki.process.redact.receiver]
+}
+
+loki.process "redact" {
+  stage.replace {
+    expression = "(eyJ[\\w-]+\\.[\\w-]+\\.[\\w-]+)"
+    replace    = "[redacted-jwt]"
+  }
+  stage.replace {
+    expression = "(?i)bearer\\s+(\\S+)"
+    replace    = "[redacted]"
+  }
+  stage.replace {
+    expression = "(\\+\\d{8,15})"
+    replace    = "[phone]"
+  }
+  stage.replace {
+    expression = "(?:^|[^\\d])(225\\d{10}|0\\d{9})(?:$|[^\\d])"
+    replace    = "[phone]"
+  }
+  forward_to = [loki.write.cloud.receiver]
+}
+
+loki.write "cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_LOKI_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+  external_labels = { host = sys.env("HOSTNAME_LABEL") }
+}

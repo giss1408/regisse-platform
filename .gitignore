@@ -11,3 +11,5 @@ infra/conf.d/*.caddy
 infra/e2e-state/
 infra/global.d/*.caddy
 !infra/global.d/.gitkeep
+infra/monitoring/.env
+*.egg-info/

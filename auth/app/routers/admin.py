@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import audit, client_ip
 from app.config import get_settings
 from app.db import get_session
+from regisse_kit.observability import security_event
 from app.deps import current_relay_admin, require_fresh, Principal, current_admin, current_super_admin
 from app.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.models import Membership, RelayRequest, User
@@ -63,6 +64,7 @@ async def relay_send(request_id: int, request: Request, admin: Principal = Depen
     if req.purpose == "password_reset":
         require_fresh(admin)  # a temporary password lets whoever types it into the account: password + a recent authenticator code, again
     url = await accounts.relay_send(db, req, admin.user_id, client_ip(request))
+    security_event("auth", "relay_sent")
     await db.commit()
     return {"url": url}
 

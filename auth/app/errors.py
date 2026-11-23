@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from regisse_kit.observability import security_event
 
 
 class DomainError(Exception):
@@ -43,6 +44,9 @@ class ServiceUnavailable(DomainError):
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:
+        if exc.status_code in (401, 403, 429):
+            # `code` is one of our own constants (never user input), so it is a safe, bounded label
+            security_event("auth", f"{exc.status_code}_{exc.code}")
         body = {"detail": exc.code}
         if exc.message:
             body["message"] = exc.message

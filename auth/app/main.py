@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from regisse_kit.health import health_router
+from regisse_kit.observability import install_observability
 from sqlalchemy import text
 
 from app import tokens
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
             response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         return response
 
+    install_observability(app, "auth", metrics_token=s.metrics_token or None)
     install_error_handlers(app)
     app.include_router(health_router({"db": _check_db}))
     app.include_router(public.router)

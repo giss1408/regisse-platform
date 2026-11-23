@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     rate_limit_storage: str = "memory://"
     trusted_proxy_hops: int = 0
+    # Bearer token for GET /metrics (Prometheus/Alloy agent on infra_net). Empty = no /metrics endpoint. Never route it through Caddy.
+    metrics_token: str = ""
 
     # base64, 32 bytes each
     field_encryption_key: str

@@ -26,8 +26,8 @@ caddy_snippet() {
 ${SITE_SCHEME:-}${name}-api.${DOMAIN} {
 	encode zstd gzip
 $( [ -n "$max_body" ] && printf '\t# A body whose declared size is over the limit is refused with 413 at once; request_body also cuts off chunked bodies that grow past it.\n\t@too_large expression `{http.request.header.Content-Length}.size() > 0 && int({http.request.header.Content-Length}) > %s`\n\trespond @too_large "Request too large" 413\n\trequest_body {\n\t\tmax_size %s\n\t}\n' "$(python3 -c "import re,sys;m=re.fullmatch(r'(\\d+)\\s*([KMG]?B)',sys.argv[1],re.I);u={'B':1,'KB':1024,'MB':1048576,'GB':1073741824};print(int(m.group(1))*u[m.group(2).upper()])" "$max_body")" "$max_body" )
-	# Private routes (called by the auth service over the private network) are not published on the public hostname.
-	@private path /internal/* /api/internal/*
+	# Private routes (called by the auth service, and /metrics scraped by the monitoring agent, over the private network) are not published on the public hostname.
+	@private path /internal/* /api/internal/* /metrics /metrics/*
 	respond @private 404
 $( [ -n "$admin_ips" ] && printf '\t# The low-level admin only from these addresses (client_ip is the real client behind Cloudflare once the trusted ranges are configured).\n\t@admin_blocked {\n\t\tpath /admin/*\n\t\tnot client_ip %s\n\t}\n\trespond @admin_blocked "Forbidden" 403\n' "$admin_ips" )
 	reverse_proxy ${upstream} {

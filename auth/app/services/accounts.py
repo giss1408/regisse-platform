@@ -20,6 +20,7 @@ from app import messages, tokens
 from app.audit import audit
 from app.config import get_settings
 from app.services import product_hooks
+from regisse_kit.observability import security_event
 from app.errors import BadRequest, Conflict, Forbidden, NotFound, ServiceUnavailable, TooManyRequests, Unauthorized
 from app.models import CodeChallenge, LegacyIdentity, Membership, PhoneChange, RefreshToken, RelayRequest, User
 from app.ratelimit import item, limiter
@@ -549,6 +550,7 @@ async def login(db: AsyncSession, *, raw_phone: str | None = None, raw_email: st
         user.password_hash = await to_thread.run_sync(hash_password, password)
     user.last_login_at = now
     pair = await issue_pair(db, user, product, app, role, held, amr, now, new_family())
+    security_event("auth", "login_ok")
     await audit(db, actor_type="user", actor_id=user.id, action="user.login", entity="user", entity_id=user.id, ip=ip, detail={"product": product, "app": app, "role": role})
     return pair
 
@@ -584,6 +586,7 @@ async def refresh(db: AsyncSession, refresh_token: str) -> dict:
         # Already exchanged once: whoever holds it now copied it. End the whole session on every copy.
         await db.execute(update(RefreshToken).where(RefreshToken.family == stored.family, RefreshToken.revoked_at.is_(None)).values(revoked_at=now))
         await db.commit()
+        security_event("auth", "refresh_reuse")
         raise Unauthorized("session_expired")
     user = await db.get(User, stored.user_id)
     held = _roles_for(user, stored.product) if user else []

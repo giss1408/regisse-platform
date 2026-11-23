@@ -14,6 +14,7 @@ os.environ.update(
         "AUTH_FIELD_ENCRYPTION_KEY": base64.b64encode(b"e" * 32).decode(),
         "AUTH_HASH_KEY": base64.b64encode(b"h" * 32).decode(),
         "AUTH_RATE_LIMIT_STORAGE": "memory://",
+        "AUTH_METRICS_TOKEN": "metrics-test-token",
         "AUTH_SERVICE_KEYS_JSON": '{"flariane": "svc-flariane-key"}',
     }
 )

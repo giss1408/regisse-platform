@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: init up down ps logs new-product backup restore-test smoke clean-demo
+.PHONY: init up down ps logs new-product backup restore-test smoke clean-demo monitoring-init monitoring-up monitoring-down
 
 init:            ## create .env with generated secrets (idempotent)
 	@scripts/init.sh
@@ -28,3 +28,12 @@ restore-test:
 
 smoke:           ## end-to-end smoke test of the infra (uses a throwaway demo product)
 	@tests/smoke.sh
+
+monitoring-init: ## create the read-only monitor DB/Redis identities and monitoring/.env
+	@scripts/make-monitoring.sh
+
+monitoring-up:   ## start the agent + exporters (ships to Grafana Cloud)
+	docker compose -f monitoring/compose.yaml --env-file monitoring/.env up -d --wait
+
+monitoring-down:
+	docker compose -f monitoring/compose.yaml --env-file monitoring/.env down

@@ -24,3 +24,6 @@ if [ -n "${RCLONE_REMOTE:-}" ]; then
 else
   echo "RCLONE_REMOTE not set: backups are local only"
 fi
+# Dead-man's switch: a monitor (Better Stack / Healthchecks / Grafana synthetic) pages when this ping stops arriving, so a silently failing backup is noticed.
+# Only reached when every dump above succeeded (set -e). Local-only backups ping /fail-less: the URL decides what that means.
+if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then curl -fsS -m 10 --retry 3 "$BACKUP_HEARTBEAT_URL" >/dev/null && echo "heartbeat sent"; fi
