@@ -158,6 +158,22 @@ check("a teacher cannot be put on a subject she was not assigned", sco.post(base
 tt = sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=th).json()
 check("the teacher reads the class timetable but cannot edit it", tt["editable"] is False and len(tt["slots"]) == 1 and sco.post(base, headers=th, json={"weekday": 3, "start": "08:00", "end": "09:00", "subject_id": mt}).status_code == 403, tt)
 check("her own week lists the period", [(x["weekday"], x["start"], x["classroom"]) for x in sco.get("/v1/timetable/me", headers=th).json()["slots"]] == [(1, "08:00", "CM2 A")])
+# ---- the teacher cancels one session of her course, with a reason
+d0 = date.today() + timedelta(days=1)
+mon = d0 + timedelta(days=(7 - d0.weekday()) % 7)            # the next Monday, strictly after today
+mon2 = mon + timedelta(days=7)
+sid1 = p1.json()["id"]
+cx = f"/v1/timetable/slots/{sid1}/cancellations"
+c1 = sco.post(cx, headers=th, json={"on_date": mon.isoformat(), "reason": "maladie", "note": "Grippe"})
+check("the teacher cancels her Monday maths session with a reason", c1.status_code == 201 and c1.json()["reason"] == "maladie", c1.text)
+check("a date that is not that weekday is refused with a sentence", sco.post(cx, headers=th, json={"on_date": (mon + timedelta(days=1)).isoformat(), "reason": "maladie"}).json()["detail"] == "date_not_that_weekday")
+check("the same session cannot be cancelled twice", sco.post(cx, headers=th, json={"on_date": mon.isoformat(), "reason": "formation"}).json()["detail"] == "session_already_cancelled")
+listed = sco.get("/v1/timetable/cancellations", headers=d).json()
+check("the director sees it with the real reason and a message for the families that does not carry it",
+      [(a["date"], a["reason"], a["teacher"]) for a in listed] == [(mon.isoformat(), "maladie", "Prof E2E")] and "enseignant absent" in listed[0]["message"] and "Grippe" not in listed[0]["message"] and "maladie" not in listed[0]["message"], listed)
+check("the teacher's own week shows her reason", [x.get("reason") for x in sco.get("/v1/timetable/me", headers=th).json()["cancellations"]] == ["maladie"])
+c2 = sco.post(cx, headers=th, json={"on_date": mon2.isoformat(), "reason": "formation"})
+check("she restores a session she cancelled", c2.status_code == 201 and sco.delete(f"{cx}/{mon2.isoformat()}", headers=th).status_code == 200 and len(sco.get("/v1/timetable/cancellations", headers=d).json()) == 1)
 sco.put(f"/v1/classrooms/{room['id']}/teachers", headers=d, json={"head_teacher_id": None, "assignments": []})
 check("when the director removes her, the class is closed to her again", sco.get(f"/v1/classrooms/{room['id']}/results?period=1", headers=th).json()["detail"] == "not_your_class")
 after = sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=d).json()["slots"]
@@ -172,7 +188,9 @@ check("she signs in at auth in the parent app", s2 == 200 and ptok["role"] == "p
 ph = H(ptok["access_token"])
 kids = sco.get("/v1/parent/children", headers=ph).json()
 check("scolaris shows her child by her verified phone number", [k["name"] for k in kids] == ["Fanta TRAORÉ"] and kids[0]["balance"]["total_due"] == 85000, kids)
-check("she reads the timetable of her child's class", [x["subject"] for x in sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/timetable", headers=ph).json()["slots"]] == ["Mathématiques"])
+ptt = sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/timetable", headers=ph).json()
+check("she reads the timetable of her child's class", [x["subject"] for x in ptt["slots"]] == ["Mathématiques"])
+check("she sees that the session is cancelled, never why", ptt["cancellations"] == [{"slot_id": sid1, "date": mon.isoformat()}] and "Grippe" not in str(ptt) and "maladie" not in str(ptt), ptt)
 check("a parent token is refused by the staff routes", sco.get("/v1/me", headers=ph).status_code == 403 and sco.get(f"/v1/arrears?year_id={year}", headers=ph).status_code == 403)
 check("she reads the report card of her child", sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/report-card?period=1", headers=ph).json()["average"] == "15.50")
 check("the director's exports work", sco.get(f"/v1/exports/headcount?year_id={year}", headers=d).json()["total"]["total"] == 1 and sco.get(f"/v1/exports/headcount?year_id={year}&format=csv", headers=d).text.lstrip("\ufeff").startswith("Niveau;"))
