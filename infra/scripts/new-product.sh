@@ -20,7 +20,12 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 
-set -a; source .env; set +a
+# --caddy-only needs no database and no .env (CI, review): DOMAIN may come from the environment instead.
+if [ "$caddy_only" = 1 ] && [ ! -f .env ]; then
+  : "${DOMAIN:?--caddy-only without a .env needs DOMAIN in the environment (e.g. DOMAIN=example.com)}"
+else
+  set -a; source .env; set +a
+fi
 
 caddy_snippet() {
   cat <<CADDY
