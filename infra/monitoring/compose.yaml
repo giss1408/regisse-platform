@@ -13,7 +13,7 @@ x-hardened: &hardened
 services:
   alloy:
     <<: *hardened
-    image: grafana/alloy:v1.10.2
+    image: grafana/alloy:v1.10.2@sha256:bcf27f18c4402869af112fb39e35e1db3804a404686f4caa20bdf77814219223
     command: ["run", "--server.http.listen-addr=127.0.0.1:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
     env_file: .env
     environment:
@@ -27,7 +27,7 @@ services:
 
   postgres-exporter:
     <<: *hardened
-    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1@sha256:38606faa38c54787525fb0ff2fd6b41b4cfb75d455c1df294927c5f611699b17
     environment:
       DATA_SOURCE_NAME: postgresql://monitor:${MONITOR_DB_PASSWORD:?run scripts/make-monitoring.sh}@postgres:5432/postgres?sslmode=disable
     read_only: true
@@ -35,7 +35,7 @@ services:
 
   redis-exporter:
     <<: *hardened
-    image: oliver006/redis_exporter:v1.74.0
+    image: oliver006/redis_exporter:v1.74.0@sha256:88862b6fc5004ead3495c16d5ba548b14e898fe6d22e7c5b93bf3df83823a9a5
     environment:
       REDIS_ADDR: redis://redis:6379
       REDIS_USER: monitor
@@ -45,7 +45,7 @@ services:
 
   cadvisor:
     <<: *hardened
-    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    image: gcr.io/cadvisor/cadvisor:v0.52.1@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435
     command: ["--docker_only=true", "--housekeeping_interval=30s", "--store_container_labels=false", "--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service"]
     cap_drop: []   # cAdvisor reads cgroups of the host: it needs its defaults
     volumes:
@@ -57,7 +57,7 @@ services:
 
   node-exporter:
     <<: *hardened
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.9.1@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a
     command: ["--path.rootfs=/host", "--collector.disable-defaults", "--collector.cpu", "--collector.meminfo", "--collector.filesystem", "--collector.loadavg", "--collector.diskstats", "--collector.netdev", "--collector.time"]
     volumes:
       - /:/host:ro,rslave
