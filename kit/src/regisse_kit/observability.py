@@ -19,22 +19,17 @@ import time
 import uuid
 from typing import Any
 
+from ._metrics import HTTP_LATENCY, HTTP_REQUESTS, SECURITY_EVENTS, security_event  # noqa: F401
 from .redact import REDACTED, redact, secret_key as _secret_key  # noqa: F401  (re-exported: redact lives in regisse_kit.redact)
 
 try:
     from fastapi import FastAPI, Request, Response
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 except ImportError as exc:  # pragma: no cover
     raise ImportError("regisse_kit.observability needs the 'observability' extra: pip install regisse-kit[observability]") from exc
 
 _STD_ATTRS = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {"message", "asctime"}
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-HTTP_REQUESTS = Counter("http_requests_total", "HTTP requests", ["service", "method", "route", "status"])
-HTTP_LATENCY = Histogram("http_request_duration_seconds", "HTTP request latency", ["service", "method", "route"],
-                         buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10))
-SECURITY_EVENTS = Counter("security_events_total", "Security-relevant events", ["service", "event"])
-
 
 class JsonRedactingFormatter(logging.Formatter):
     def __init__(self, service: str) -> None:
@@ -69,11 +64,6 @@ def setup_logging(service: str, level: str = "INFO") -> None:
         lg.propagate = True
     # uvicorn's access log carries raw paths (may hold identifiers); the middleware below logs the route template instead.
     logging.getLogger("uvicorn.access").disabled = True
-
-
-def security_event(service: str, event: str) -> None:
-    """Counts a security-relevant event (login_failed, lockout, refresh_reuse, relay_sent, rate_limited...). Names are code constants, never user input."""
-    SECURITY_EVENTS.labels(service=service, event=event).inc()
 
 
 def install_observability(app: FastAPI, service: str, *, metrics_token: str | None = None, log_level: str = "INFO") -> None:
