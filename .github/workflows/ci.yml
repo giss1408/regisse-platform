@@ -43,13 +43,11 @@ jobs:
         run: pip install pip-audit && pip-audit -r auth/requirements.txt --strict
       - name: Build the auth image
         run: docker build -t auth-backend:ci --build-context kit=kit auth
-      - name: Image scan (HIGH and CRITICAL fail the build)
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          image-ref: auth-backend:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+      - name: Image scan (HIGH and CRITICAL with a fix available fail the build)
+        # Trivy runs from its own container image: the aquasecurity/trivy-action chain (setup-trivy) failed to resolve on GitHub.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 auth-backend:ci
 
   config:
     runs-on: ubuntu-latest

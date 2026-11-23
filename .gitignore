@@ -13,3 +13,5 @@ infra/global.d/*.caddy
 !infra/global.d/.gitkeep
 infra/monitoring/.env
 *.egg-info/
+build/
+dist/
