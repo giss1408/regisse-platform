@@ -4,14 +4,13 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from functools import lru_cache
 
 import pyotp
 from anyio import to_thread
 from regisse_kit import codes as kit_codes
 from regisse_kit import passwords as kit_passwords
 from regisse_kit import phone as kit_phone
-from regisse_kit.crypto import FieldCipher, KeyedHasher, hash_password, needs_rehash, random_token, token_hash, verify_password
+from regisse_kit.crypto import hash_password, needs_rehash, random_token, token_hash, verify_password
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +20,7 @@ from app.audit import audit
 from app.config import get_settings
 from app.services import product_hooks
 from regisse_kit.observability import security_event
+from app.keys import cipher, hasher  # versioned key rings, see regisse_kit.keyring
 from app.errors import BadRequest, Conflict, Forbidden, NotFound, ServiceUnavailable, TooManyRequests, Unauthorized
 from app.models import CodeChallenge, LegacyIdentity, Membership, PhoneChange, RefreshToken, RelayRequest, User
 from app.ratelimit import item, limiter
@@ -30,24 +30,6 @@ from app.tokens import utcnow
 _DUMMY_HASH = hash_password("dummy-password-for-timing")
 PRIVILEGED_ROLES = {"super_admin", "admin", "operator", "viewer", "pickup", "agent", "platform_admin"}
 CONSENT_VERSION = "2026-11"
-
-
-@lru_cache
-def _hasher(key: str) -> KeyedHasher:
-    return KeyedHasher(key)
-
-
-@lru_cache
-def _cipher(key: str) -> FieldCipher:
-    return FieldCipher(key)
-
-
-def hasher() -> KeyedHasher:
-    return _hasher(get_settings().hash_key)
-
-
-def cipher() -> FieldCipher:
-    return _cipher(get_settings().field_encryption_key)
 
 
 def ip_limit(spec: str, scope: str, ip: str | None) -> None:
@@ -98,12 +80,12 @@ def normalize_email(raw: str) -> str:
 
 
 async def user_by_email(db: AsyncSession, email: str, *, lock: bool = False) -> User | None:
-    q = select(User).where(User.email_hash == hasher().hash(email, "email"))
+    q = select(User).where(User.email_hash.in_(hasher().hash_all(email, "email")))
     return await db.scalar(q.with_for_update() if lock else q)
 
 
 async def user_by_phone(db: AsyncSession, e164: str, *, lock: bool = False) -> User | None:
-    q = select(User).where(User.phone_hash == hasher().phone(e164))
+    q = select(User).where(User.phone_hash.in_(hasher().phone_all(e164)))
     return await db.scalar(q.with_for_update() if lock else q)
 
 
@@ -388,8 +370,8 @@ async def apply_due_phone_changes(db: AsyncSession, now: datetime | None = None,
     now = now or utcnow()
     q = select(PhoneChange).where(PhoneChange.status == "scheduled", PhoneChange.effective_at <= now)
     if phone is not None:
-        ph = hasher().phone(phone)
-        q = q.join(User, User.id == PhoneChange.user_id).where((PhoneChange.new_phone_hash == ph) | (User.phone_hash == ph))
+        phs = hasher().phone_all(phone)  # every key of the ring: stored hashes may still be under an older key
+        q = q.join(User, User.id == PhoneChange.user_id).where(PhoneChange.new_phone_hash.in_(phs) | User.phone_hash.in_(phs))
     out = {"applied": 0, "waiting_for_product": 0, "failed": 0}
     for pc in (await db.scalars(q.order_by(PhoneChange.id))).all():
         user = await db.scalar(select(User).where(User.id == pc.user_id).with_for_update())

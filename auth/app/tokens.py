@@ -6,12 +6,11 @@ Consumers verify tokens locally with the JWKS and pin the algorithm (EdDSA): the
 import base64
 import uuid
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from regisse_kit.crypto import FieldCipher
+from app.keys import cipher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,11 +23,6 @@ ALG = "EdDSA"
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-@lru_cache
-def _cipher(key: str) -> FieldCipher:
-    return FieldCipher(key)
 
 
 def _b64u(raw: bytes) -> str:
@@ -51,7 +45,7 @@ async def create_key(db: AsyncSession) -> SigningKey:
     priv = Ed25519PrivateKey.generate()
     pem = priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
     pub = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    row = SigningKey(kid=uuid.uuid4().hex[:16], public_b64=_b64u(pub), private_enc=_cipher(get_settings().field_encryption_key).encrypt(pem.decode()))
+    row = SigningKey(kid=uuid.uuid4().hex[:16], public_b64=_b64u(pub), private_enc=cipher().encrypt(pem.decode()))
     db.add(row)
     await db.flush()
     return row
@@ -65,7 +59,7 @@ async def rotate_key(db: AsyncSession) -> SigningKey:
 
 
 def _private(key: SigningKey) -> Ed25519PrivateKey:
-    pem = _cipher(get_settings().field_encryption_key).decrypt(key.private_enc).encode()
+    pem = cipher().decrypt(key.private_enc).encode()
     return serialization.load_pem_private_key(pem, password=None)  # type: ignore[return-value]
 
 

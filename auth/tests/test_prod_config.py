@@ -33,9 +33,9 @@ def test_a_correct_prod_config_starts():
     ({"database_url": "postgresql://auth:auth@postgres/db"}, "database"),
     ({"rate_limit_storage": "memory://"}, "rate_limit_storage"),
     ({"trusted_proxy_hops": 0}, "trusted_proxy_hops"),
-    ({"hash_key": base64.b64encode(b"h" * 32).decode()}, "hash_key"),
-    ({"field_encryption_key": base64.b64encode(b"e" * 31).decode()}, "field_encryption_key"),
-    ({"hash_key": GOOD["field_encryption_key"]}, "hash_key"),
+    ({"hash_key": base64.b64encode(b"h" * 32).decode()}, "hash key '0'"),
+    ({"field_encryption_key": base64.b64encode(b"e" * 31).decode()}, "field key '0'"),
+    ({"hash_key": GOOD["field_encryption_key"]}, "hash keys must differ"),
     ({"metrics_token": "short"}, "metrics_token"),
     ({"service_keys_json": '{"flariane": "short"}'}, "service key"),
 ])
@@ -61,3 +61,18 @@ def test_prod_only_rules(over, why):
 def test_dev_and_test_stay_permissive():
     s = Settings(_env_file=None, env="dev", field_encryption_key=GOOD["field_encryption_key"], hash_key=GOOD["hash_key"])
     assert s.rate_limit_storage == "memory://"
+
+
+def test_key_ring_rules():
+    k1, k2 = base64.b64encode(bytes(range(64, 96))).decode(), base64.b64encode(bytes(range(96, 128))).decode()
+    ok = make(field_keys_json='{"1": "%s"}' % k1, field_key_current="1", hash_keys_json='{"1": "%s"}' % k2, hash_key_current="1")
+    assert ok.field_key_current == "1"
+    for over, why in [
+        ({"field_key_current": "9"}, "field_key_current"),
+        ({"field_keys_json": '{"1": "%s"}' % GOOD["field_encryption_key"]}, "field keys must all differ"),
+        ({"hash_keys_json": '{"1": "%s"}' % GOOD["field_encryption_key"]}, "hash keys must differ"),
+        ({"field_keys_json": '{"1": "AAAA"}'}, "field key '1'"),
+    ]:
+        with pytest.raises(ValidationError) as e:
+            make(**over)
+        assert why in str(e.value)

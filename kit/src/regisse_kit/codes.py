@@ -56,6 +56,8 @@ def check(hasher: KeyedHasher, challenge: CodeChallenge | None, subject: str, pu
         raise NoActiveCode()
     if challenge.attempts >= max_attempts:
         raise TooManyAttempts()
-    if not constant_time_equals(challenge.code_hash, _hash(hasher, subject, purpose, code)):
+    # A versioned hasher (see keyring) also accepts codes issued under an older key, so a rotation does not invalidate pending codes.
+    candidates = hasher.hash_all(f"{subject}:{code}", f"code:{purpose}") if hasattr(hasher, "hash_all") else [_hash(hasher, subject, purpose, code)]
+    if not any([constant_time_equals(challenge.code_hash, c) for c in candidates]):
         challenge.attempts += 1
         raise WrongCode()

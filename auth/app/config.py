@@ -43,6 +43,16 @@ DEFAULT_PRODUCTS: dict = {
         # roles the product's own backend may create, reset and remove through the service endpoints (never its admins)
         "service_staff_roles": ["retailer_staff"],
     },
+    # School management (Côte d'Ivoire). A school's staff (director, secretary, accountant/cashier) are enrolled by the product's backend
+    # through /v1/service/staff; parents sign up themselves (phone-first); the platform admin runs the relay and creates the first director.
+    "scolaris": {
+        "apps": {"staff": ["director", "accountant", "secretary"], "parent": ["parent"], "admin": ["platform_admin"]},
+        "self_register": {"app": "parent", "role": "parent"},
+        "totp_roles": ["platform_admin"],
+        "admin_roles": ["platform_admin"],
+        "top_admin_roles": ["platform_admin"],
+        "service_staff_roles": ["director", "accountant", "secretary"],
+    },
 }
 
 
@@ -61,6 +71,12 @@ class Settings(BaseSettings):
     # base64, 32 bytes each
     field_encryption_key: str
     hash_key: str
+    # Key rotation (see regisse_kit.keyring). `field_encryption_key` / `hash_key` above are key id "0" (the legacy, unversioned key).
+    # A new key is added here as {"1": "<base64>"} and made current; the old one stays until `rotate-data-keys --verify` reports nothing left.
+    field_keys_json: str = ""
+    field_key_current: str = "0"
+    hash_keys_json: str = ""
+    hash_key_current: str = "0"
 
     access_token_minutes: int = 10
     refresh_days: int = 30
@@ -109,17 +125,24 @@ class Settings(BaseSettings):
             bad.append("rate_limit_storage must be redis (memory is per process and lost on restart)")
         if self.trusted_proxy_hops < 1:
             bad.append("trusted_proxy_hops must be >= 1 (behind Caddy/Cloudflare); 0 trusts the proxy address as the client")
-        keys = {}
-        for name in ("field_encryption_key", "hash_key"):
-            try:
-                raw = base64.b64decode(getattr(self, name), validate=True)
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if len(raw) != 32 or len(set(raw)) < 8:
-                bad.append(f"{name} must be 32 random bytes in base64")
-            keys[name] = raw
-        if keys["field_encryption_key"] == keys["hash_key"]:
-            bad.append("hash_key must differ from field_encryption_key")
+        rings: dict[str, set[bytes]] = {}
+        for label, ring, current in (("field", self.field_keyring, self.field_key_current), ("hash", self.hash_keyring, self.hash_key_current)):
+            raws: list[bytes] = []
+            for kid, b64 in ring.items():
+                try:
+                    raw = base64.b64decode(b64, validate=True)
+                except Exception:  # noqa: BLE001
+                    raw = b""
+                if len(raw) != 32 or len(set(raw)) < 8:
+                    bad.append(f"{label} key {kid!r} must be 32 random bytes in base64")
+                raws.append(raw)
+            if len(set(raws)) != len(raws):
+                bad.append(f"{label} keys must all differ")
+            if current not in ring:
+                bad.append(f"{label}_key_current {current!r} is not in the {label} key ring")
+            rings[label] = set(raws)
+        if rings["field"] & rings["hash"]:
+            bad.append("hash keys must differ from field encryption keys")
         if self.metrics_token and len(self.metrics_token) < 32:
             bad.append("metrics_token must be at least 32 characters")
         if any(len(k) < 32 for k in self.service_keys.values()):
@@ -129,6 +152,14 @@ class Settings(BaseSettings):
         if bad:
             raise ValueError("unsafe " + self.env + " configuration: " + "; ".join(bad))
         return self
+
+    @property
+    def field_keyring(self) -> dict[str, str]:
+        return {**(json.loads(self.field_keys_json) if self.field_keys_json else {}), "0": self.field_encryption_key}
+
+    @property
+    def hash_keyring(self) -> dict[str, str]:
+        return {**(json.loads(self.hash_keys_json) if self.hash_keys_json else {}), "0": self.hash_key}
 
     @property
     def test_numbers_ok(self) -> bool:

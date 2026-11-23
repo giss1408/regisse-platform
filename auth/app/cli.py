@@ -2,6 +2,7 @@
 
     AUTH_ADMIN_PASSWORD=... python -m app.cli create-admin --phone 0701020304 --name "Régis" --role super_admin
     python -m app.cli rotate-key
+    python -m app.cli rotate-data-keys [--apply] [--verify]   # see docs/KEY_ROTATION.md
     FLARIANE_DATABASE_URL=... FLARIANE_FIELD_ENCRYPTION_KEY=... python -m app.cli import-flariane [--apply] [--refresh] [--cutover]
     FIDELIA_DATABASE_URL=... python -m app.cli import-fidelia [--apply] [--refresh] [--cutover]
     python -m app.cli gen-keys
@@ -48,6 +49,74 @@ async def rotate() -> None:
         key = await tokens.rotate_key(db)
         await db.commit()
     print(f"new signing key {key.kid}; the previous key stays in the JWKS until its tokens expire")
+
+
+async def rotate_data_keys(apply: bool, verify: bool) -> int:
+    """Moves every encrypted field and lookup hash to the CURRENT key ring entry (online, in batches, safe to re-run).
+
+    Without --apply it only counts what is left (a dry run); --verify does the same and exits 1 when anything is left, which is the
+    signal that an old key may be retired from the environment. Prints counts only, never data.
+    """
+    import json
+
+    from sqlalchemy import select
+
+    from app.keys import cipher, hasher
+    from app.models import PhoneChange, SigningKey, User
+
+    c, h = cipher(), hasher()
+    left = {"users": 0, "phone_changes": 0, "signing_keys": 0}
+    async with SessionLocal() as db:
+        for model, name in ((User, "users"), (PhoneChange, "phone_changes"), (SigningKey, "signing_keys")):
+            last = None
+            while True:
+                q = select(model).order_by(model.id if model is not SigningKey else model.kid).limit(200).with_for_update()
+                key = model.id if model is not SigningKey else model.kid
+                if last is not None:
+                    q = q.where(key > last)
+                rows = (await db.scalars(q)).all()
+                if not rows:
+                    break
+                for r in rows:
+                    changed = False
+                    if isinstance(r, User):
+                        for enc, hs, purpose in (("phone_enc", "phone_hash", "phone"), ("email_enc", "email_hash", "email")):
+                            blob = getattr(r, enc)
+                            if blob is None:
+                                continue
+                            plain = c.decrypt(blob)
+                            want = h.phone(plain) if purpose == "phone" else h.hash(plain, "email")
+                            if not c.is_current(blob) or getattr(r, hs) != want:
+                                changed = True
+                                if apply:
+                                    setattr(r, enc, c.reencrypt(blob) if not c.is_current(blob) else blob)
+                                    setattr(r, hs, want)
+                        if r.totp_secret_enc is not None and not c.is_current(r.totp_secret_enc):
+                            changed = True
+                            if apply:
+                                r.totp_secret_enc = c.reencrypt(r.totp_secret_enc)
+                    elif isinstance(r, PhoneChange):
+                        plain = c.decrypt(r.new_phone_enc)
+                        if not c.is_current(r.new_phone_enc) or r.new_phone_hash != h.phone(plain) or (r.old_phone_enc is not None and not c.is_current(r.old_phone_enc)):
+                            changed = True
+                            if apply:
+                                r.new_phone_enc, r.new_phone_hash = c.reencrypt(r.new_phone_enc), h.phone(plain)
+                                if r.old_phone_enc is not None:
+                                    r.old_phone_enc = c.reencrypt(r.old_phone_enc)
+                    else:  # SigningKey
+                        if not c.is_current(r.private_enc):
+                            changed = True
+                            if apply:
+                                r.private_enc = c.reencrypt(r.private_enc)
+                    if changed:
+                        left[name] += 1
+                last = getattr(rows[-1], "id", None) if model is not SigningKey else rows[-1].kid
+                if apply:
+                    await db.commit()
+                else:
+                    await db.rollback()
+    print(json.dumps({"rows_" + ("rotated" if apply else "left"): left, "current_field_key": c.current, "current_hash_key": h.current}))
+    return 1 if (verify and any(left.values())) else 0
 
 
 def _naive_utc(dt):  # flariane stores timezone-aware timestamps; auth stores naive UTC
@@ -225,6 +294,9 @@ def main() -> None:
     a.add_argument("--name", required=True)
     a.add_argument("--role", choices=["super_admin", "admin"], default="super_admin")
     sub.add_parser("rotate-key")
+    rk = sub.add_parser("rotate-data-keys", help="move encrypted fields and lookup hashes to the current key of the ring (dry run without --apply)")
+    rk.add_argument("--apply", action="store_true")
+    rk.add_argument("--verify", action="store_true", help="exit 1 if anything is still under another key (safe to retire the old key only on exit 0)")
     sub.add_parser("apply-phone-changes")
     sub.add_parser("run-scheduler")
     sub.add_parser("scheduler-healthy")
@@ -244,6 +316,8 @@ def main() -> None:
     args = p.parse_args()
     if args.cmd == "create-admin":
         asyncio.run(create_admin(args.phone, args.name, args.role))
+    elif args.cmd == "rotate-data-keys":
+        raise SystemExit(asyncio.run(rotate_data_keys(args.apply, args.verify)))
     elif args.cmd == "rotate-key":
         asyncio.run(rotate())
     elif args.cmd == "run-scheduler":
