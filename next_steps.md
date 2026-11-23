@@ -27,7 +27,7 @@ The other apps are not finished: do NOT migrate or add tests for them until the 
 
 ## Open next steps (updated 2026-11-23, after Step 37)
 
-Branches not pushed: platform `platform/security-monitoring`; fidelia, supermarket, scolaris `platform/observability-hardening`. Review and merge deliberately, one repo at a time.
+Pushed (2026-11-23), not merged: fidelia (`djassa-BE` remote), supermarket (`supeermarket-app` remote) and scolaris, each on `platform/observability-hardening`. Platform work is on `origin/main`. Review and merge the three product branches deliberately, one repo at a time.
 
 **A. Apply to the running local stack (nothing below was run on it; each recreates containers, so do it when you can afford a few seconds of downtime per product)**
 1. `infra/scripts/make-pg-tls.sh`, then `make up` (recreates postgres, caddy, redis: TLS, digest pins, Caddy limits, network attach). Then `make smoke`.
