@@ -21,6 +21,16 @@ prometheus.scrape "auth" {
   forward_to      = [prometheus.remote_write.cloud.receiver]
 }
 
+// Fidelia keeps its own metrics module: /metrics answers only to METRICS_TOKEN (bearer), route-template labels, and no `service` label,
+// so one is added here to line it up with the alert rules.
+prometheus.scrape "fidelia" {
+  targets         = [{ __address__ = "fidelia-web:8000", job = "fidelia", service = "fidelia" }]
+  metrics_path    = "/metrics"
+  bearer_token    = sys.env("FIDELIA_METRICS_TOKEN")
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
 prometheus.scrape "postgres" {
   targets    = [{ __address__ = "postgres-exporter:9187", job = "postgres" }]
   forward_to = [prometheus.remote_write.cloud.receiver]

@@ -13,5 +13,8 @@ echo "== part 1: the platform admin is created at auth"; run_py 1 || fail=1
 echo "== the platform team creates the school (enrols the director at auth)"
 docker exec scolaris-web python -m app.cli create-school --name "Ecole E2E" --city Abidjan --director-name "Directrice E2E" --director-phone "$DIRECTOR_PHONE" --year 2026-2027 --starts 2026-09-14 --ends 2027-06-30 || fail=1
 echo "== part 2: activation, sign-in at auth, scolaris"; run_py 2 || fail=1
+echo "== part 3: the Flutter app's real Dart code against the live stack"
+( cd "$ROOT/../scolaris/app" && SCOLARIS_LIVE=1 LIVE_PHONE="$DIRECTOR_PHONE" LIVE_PASSWORD="Ecole-Pass-2026x" LIVE_DOMAIN="$DOMAIN" flutter test integration/live_smoke_test.dart 2>&1 | tr '\r' '\n' | grep -E "All tests passed|Some tests failed|Expected|Actual|\[E\]" | sort -u ) | tee "$STATE/app.out"
+grep -q "All tests passed" "$STATE/app.out" || fail=1
 echo; [ "$fail" = 0 ] && echo "SCOLARIS CHAIN: all green" || echo "SCOLARIS CHAIN: FAILURES"
 exit $fail

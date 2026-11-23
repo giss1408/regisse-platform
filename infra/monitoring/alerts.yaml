@@ -68,3 +68,19 @@ groups:
         expr: sum(increase(security_events_total{event=~"403_.*"}[10m])) > 30
         labels: {severity: warn}
         annotations: {summary: "Many 403 answers: probing of admin endpoints"}
+  - name: fidelia-security
+    rules:
+      - alert: FideliaWrongCodeSpike
+        expr: sum(rate(fidelia_auth_events_total{event="otp_verify",result="wrong_code"}[5m])) > 0.5
+        for: 5m
+        labels: {severity: warn}
+        annotations: {summary: "Fidelia: sustained wrong sign-in codes (guessing attack)"}
+      - alert: FideliaSmsBudgetHit
+        expr: increase(fidelia_auth_events_total{event="otp_request",result="daily_budget"}[1h]) > 0
+        labels: {severity: page}
+        annotations: {summary: "Fidelia: the daily SMS budget was reached (SMS pumping, or a real traffic peak): check before raising it"}
+      - alert: FideliaSmsDeliveryFailing
+        expr: sum(rate(fidelia_auth_events_total{event="otp_request",result="delivery_failed"}[15m])) / sum(rate(fidelia_auth_events_total{event="otp_request"}[15m])) > 0.2
+        for: 10m
+        labels: {severity: page}
+        annotations: {summary: "Fidelia: more than 20% of sign-in SMS fail to send (nobody can sign in)"}
