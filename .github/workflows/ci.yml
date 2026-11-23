@@ -44,7 +44,7 @@ jobs:
       - name: Build the auth image
         run: docker build -t auth-backend:ci --build-context kit=kit auth
       - name: Image scan (HIGH and CRITICAL fail the build)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: auth-backend:ci
           severity: HIGH,CRITICAL
