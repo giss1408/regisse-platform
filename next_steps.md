@@ -19,8 +19,41 @@ The other apps are not finished: do NOT migrate or add tests for them until the 
 | 3. `regisse_kit` v0.1, extracted from flariane only | DONE | `platform/kit`: 38 tests (incl. flariane parity vectors); adopted in flariane via thin wrappers; flariane pytest 155/155 and e2e 101/101 after adoption |
 | 3b. `auth` service v0.1 (`platform/auth`) | DONE as a service; flariane NOT yet a consumer | 23 unit/integration tests (PG17), e2e through Caddy 32/32, kit 49 tests incl. `regisse_kit.sso` |
 | 4-5. Other products | PARKED (not finished by owner) | |
+| 7. Monitoring (Grafana Cloud agent, kit observability, 18 alert rules) | BUILT, NOT RUNNING | Steps 28, 32, 35; needs the Grafana Cloud account, Telegram contact point, `mimirtool rules load` |
+| 8. Security hardening of auth and infra (fail-closed config, key versioning, append-only audit, Postgres TLS, Caddy limits, image digests, CI) | BUILT, NOT APPLIED to the running stack | Steps 29-31, 36; kit 72, auth 158 |
+| 9. Kit rollout (observability, headers, masking, hardened containers) | fidelia, supermarket, scolaris DONE on `platform/observability-hardening`; flariane TODO (live) | Steps 32, 35 |
 | 6. Final e2e (flariane through infra + auth) | TODO | |
 | 1b. Hetzner + Cloudflare + R2 | TODO (owner accounts) | |
+
+## Open next steps (updated 2026-11-23, after Step 37)
+
+Branches not pushed: platform `platform/security-monitoring`; fidelia, supermarket, scolaris `platform/observability-hardening`. Review and merge deliberately, one repo at a time.
+
+**A. Apply to the running local stack (nothing below was run on it; each recreates containers, so do it when you can afford a few seconds of downtime per product)**
+1. `infra/scripts/make-pg-tls.sh`, then `make up` (recreates postgres, caddy, redis: TLS, digest pins, Caddy limits, network attach). Then `make smoke`.
+2. Regenerate the existing Caddy snippets (`conf.d/*.caddy` are generated and untracked) or add `/metrics /metrics/*` to each `@private` matcher: until then `/metrics` of auth, fidelia, supermarket, scolaris is reachable on the public hostname (it answers 401/404 without the token, but it should not be routed at all).
+3. Rebuild and restart auth, fidelia, supermarket, scolaris from their new branches; set `AUTH_METRICS_TOKEN` (by hand, 32+ characters), and `METRICS_TOKEN` / `SCO_METRICS_TOKEN` (generated `@random` by `make-product-env.sh`).
+4. `AUTH_ENV=staging` now refuses weak secrets: check the local `auth/.env.platform` still starts (strict on keys, service keys, redis rate-limit storage, `trusted_proxy_hops >= 1`).
+
+**B. Owner actions (blocking real monitoring and production)**
+5. Grafana Cloud stack, access-policy token (metrics:write, logs:write), Telegram bot as a contact point; fill `infra/monitoring/.env` (including `FIDELIA_`, `SUPERMARKET_`, `SCOLARIS_METRICS_TOKEN`), `make monitoring-init`, `make monitoring-up`, `mimirtool rules load infra/monitoring/alerts.yaml`.
+6. Backups for real: `AGE_RECIPIENT`, `RCLONE_REMOTE` (R2), `BACKUP_HEARTBEAT_URL`; production `backup.sh` now refuses without the first two. Rehearse `rotate-data-keys` (`auth/docs/KEY_ROTATION.md`) on a restored dump first.
+7. Cloudflare rate-limiting rules for the public APIs (stock Caddy has none): e.g. 10 requests/min per IP on login, activate and OTP routes; or decide on a custom Caddy build with a plugin.
+8. Hetzner host and Cloudflare setup (Phase 1b), as before.
+
+**C. flariane (live, Play closed test): needs a plan approved by the owner first**
+9. Branch `platform/observability-hardening`: log masking, token-gated `/metrics`, security headers, container hardening, and the dependency upgrades from `docs/platform/AUTH_SECURITY_REVIEW.md` (pillow, cryptography, starlette, PyJWT, python-multipart, requests: highest priority, it decodes uploaded images). Full test suite, staging rehearsal, rollback = previous image; old host and DB untouched for 7 days.
+10. fidelia: replace `python-jose` by PyJWT (weakly maintained).
+
+**D. Hardening still open**
+11. Move each product to its own network (`net_<p>`; opt-in, see Step 36); modest gain on one host, do it after A and C.
+12. Give products the Postgres CA and `sslmode=verify-full` (today TLS is required but clients do not verify the server certificate).
+13. Separate migration role and runtime role so the append-only trigger on `audit_log` cannot be dropped by the app role; off-host copy of the audit rows (logs are shipped).
+14. Pin base images by digest in the product Dockerfiles (platform images are pinned; `scripts/pin-images.sh --update` monthly).
+15. Caddy metrics (needs `metrics` inside the single `servers` block; test with `caddy validate`), an external uptime probe per `*-api` host, `pip-audit`/Trivy in each product's CI (the kit is not installable on GitHub yet: publish it or vendor it).
+16. External penetration test before real users (auth review, residual #10).
+
+**E. Products (see their own steps):** scolaris backlog (Steps 34 and 37, "Not built"); supermarket Flutter staff mode (Step 27); fidelia production settings (Step 24).
 
 ## How to run what exists
 
@@ -48,7 +81,7 @@ scripts/remove-product.sh <name> --yes   # DESTRUCTIVE
 
 ## Known gaps / TODO in infra
 - Backup container/cron not defined (script exists; schedule on the host with cron or a sidecar when deploying).
-- No monitoring/uptime yet (Phase 6).
+- Monitoring is built but not running: see "Open next steps" above (needs the Grafana Cloud account).
 - Postgres tuning defaults in `.env.example` are LOCAL-sized; production values in plan section 8 Phase 1.
 
 ## Where we stopped (owner said: stop after the e2e step, 2026-11-19)
@@ -513,13 +546,13 @@ Branch `platform/security-monitoring` (committed locally, not pushed).
 
 **Image digests (same step):** `infra/scripts/pin-images.sh` pins every `image:` of `infra/compose.yaml` and `infra/monitoring/compose.yaml` and the `FROM` of `auth/Dockerfile` to the multi-arch index digest (`caddy:2.8-alpine@sha256:...`: the tag stays readable, Docker checks the digest). 9 images pinned; compose files validate, two digests pulled, the auth image builds from the pinned base and Trivy reports 0 HIGH / 0 CRITICAL. Pinning means base-image fixes no longer arrive by themselves: run `scripts/pin-images.sh --update` deliberately (monthly), then `make smoke` and the Trivy scan; the auth Dockerfile also upgrades OS packages at build time. Product repos (flariane, fidelia, supermarket, scolaris) still use tags in their own Dockerfiles: pin them on their own branches.
 
+**Per-product networks (same step, opt-in):** `scripts/connect-nets.sh` attaches the shared services (caddy, postgres, redis, `auth-web`, the monitoring agent) to every `net_<product>` network, idempotently (`docker network connect` does not survive a container being recreated, so `make up` and `new-product.sh` run it; `make nets` by hand). `new-product.sh <name> --isolated` (or `make new-product NAME=x ISOLATED=1`) creates `net_<name>`; `remove-product.sh` removes it. `tests/isolation.sh` (`make isolation-test`, also in CI) proves it with stand-in containers that do NOT touch the running stack: A and B each reach the shared service, A and B cannot reach each other, the connect step is idempotent, and a negative control (B placed on A's network CAN reach A) shows the check can detect a leak. 6/6. An earlier version of this test passed for the wrong reason (its targets listened on nothing); the control caught it.
+**No product is migrated yet.** To migrate one (flariane, fidelia, supermarket, scolaris, auth): `docker network create --label com.regisse.product=<p> net_<p>`, `make nets`, in its compose file replace `infra_net` by the external network `net_<p>` (all its services), recreate it, check `/readyz`. Cross-product calls then go through the shared services only: **auth calls fidelia's hook at `fidelia-web:8000` and products call `auth-web:8000`: both work because `auth-web` is attached to every product network, but a product's hook host must be reachable from `auth-web` (it is, on `net_<p>`)**; a product that calls another product directly would break (none does). One product at a time, staging first. `infra_net` stays for caddy, postgres, redis and anything not yet migrated.
+**IMPORTANT for the running local stack:** `make up` (and `make smoke`, which calls it) now RECREATES postgres, caddy and redis, because their image references changed (digest pins) and postgres has the TLS command: every product loses its database for a few seconds. Run `scripts/make-pg-tls.sh` first. I did not run it on your stack.
+
 ## Step 37: scolaris, finer permissions: teachers linked to their classes (2026-11-23)
 
 Migration `0003` (`teacher_assignment`, `classroom.head_teacher_id`, named FK). A teacher now has NO access until the director assigns her to a class (for one subject or all her subjects there); the class's head teacher (professeur principal) views the whole class and writes conduct and appreciation, but creates marks only in her own subjects. Enforced on evaluations, marks, results, report cards, remarks, roll call, the classroom list (teacher sees hers, with an `is_head` flag) and the subject list (`?classroom_id=` returns only hers). A teacher can no longer read the school register (`/v1/students*`); marks of an evaluation she created are frozen for her once she is no longer assigned (nothing deleted). `GET/PUT /v1/classrooms/{id}/teachers` (director only; active teachers of the same school only). The full permission matrix is in `scolaris/README.md`.
 **Flutter:** "Enseignants de la classe" screen (head teacher, assignments by subject), Notes tab shows only her classes with a "Professeur principal" badge and a clear message when none is assigned, new evaluation offers only her subjects, the conduct/appreciation button only for the director, the secretary and the class's head teacher.
 **Verified:** backend 66 tests (8 new for assignments, isolation between schools included; migrations 0001 -> 0003 -> 0002 -> 0003 and `alembic check`); app 46 tests, `flutter analyze` clean, no overflow at 320 px / text x2; `tests/e2e_scolaris.sh` **37/37** with a real teacher (activation by WhatsApp code, sign-in at auth, closed class before assignment, assigned, limited subjects, head-teacher rights, closed again after removal) + the app's Dart code on the live stack. `scolaris-web` rebuilt on this machine (healthy, migration 0003 applied by the container at start).
 **Not done:** a teacher is not tied to a timetable or a term; no per-period lock of conduct; assignments are not copied to the next school year (the director re-assigns each year); committed and pushed with this note.
-
-**Per-product networks (same step, opt-in):** `scripts/connect-nets.sh` attaches the shared services (caddy, postgres, redis, `auth-web`, the monitoring agent) to every `net_<product>` network, idempotently (`docker network connect` does not survive a container being recreated, so `make up` and `new-product.sh` run it; `make nets` by hand). `new-product.sh <name> --isolated` (or `make new-product NAME=x ISOLATED=1`) creates `net_<name>`; `remove-product.sh` removes it. `tests/isolation.sh` (`make isolation-test`, also in CI) proves it with stand-in containers that do NOT touch the running stack: A and B each reach the shared service, A and B cannot reach each other, the connect step is idempotent, and a negative control (B placed on A's network CAN reach A) shows the check can detect a leak. 6/6. An earlier version of this test passed for the wrong reason (its targets listened on nothing); the control caught it.
-**No product is migrated yet.** To migrate one (flariane, fidelia, supermarket, scolaris, auth): `docker network create --label com.regisse.product=<p> net_<p>`, `make nets`, in its compose file replace `infra_net` by the external network `net_<p>` (all its services), recreate it, check `/readyz`. Cross-product calls then go through the shared services only: **auth calls fidelia's hook at `fidelia-web:8000` and products call `auth-web:8000`: both work because `auth-web` is attached to every product network, but a product's hook host must be reachable from `auth-web` (it is, on `net_<p>`)**; a product that calls another product directly would break (none does). One product at a time, staging first. `infra_net` stays for caddy, postgres, redis and anything not yet migrated.
-**IMPORTANT for the running local stack:** `make up` (and `make smoke`, which calls it) now RECREATES postgres, caddy and redis, because their image references changed (digest pins) and postgres has the TLS command: every product loses its database for a few seconds. Run `scripts/make-pg-tls.sh` first. I did not run it on your stack.
