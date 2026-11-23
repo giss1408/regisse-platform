@@ -13,4 +13,5 @@ fill() { # key
 }
 fill POSTGRES_PASSWORD
 fill REDIS_ADMIN_PASSWORD
+scripts/make-pg-tls.sh
 echo ".env ready"

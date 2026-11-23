@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
     --postgis) postgis=1 ;;
     --upstream) upstream="$2"; shift ;;
     --max-body) max_body="$2"; shift ;;      # e.g. 6MB: Caddy answers 413 above it, before the app sees the body
-    --admin-ips) admin_ips="$2"; shift ;;    # space-separated IPs/CIDRs allowed to open /admin/* (optional; see global.d/cloudflare.caddy.example)
+    --admin-ips) admin_ips="$2"; shift ;;    # space-separated IPs/CIDRs allowed to open /admin/* (optional; see servers.d/cloudflare.caddy.example)
     --caddy-only) caddy_only=1 ;;            # print the Caddy snippet and exit (no database, no files): for review and tests
     *) echo "unknown arg $1"; exit 2 ;;
   esac; shift

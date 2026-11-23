@@ -60,6 +60,13 @@ jobs:
           touch infra/monitoring/.env
           MONITOR_DB_PASSWORD=x MONITOR_REDIS_PASSWORD=x docker compose -f infra/monitoring/compose.yaml config -q
           POSTGRES_PASSWORD=x REDIS_ADMIN_PASSWORD=x docker compose -f infra/compose.yaml config -q
+      - name: Caddy config is valid (with and without the Cloudflare snippet)
+        run: |
+          mkdir -p /tmp/cd/global.d /tmp/cd/servers.d /tmp/cd/conf.d
+          cp infra/Caddyfile /tmp/cd/; DOMAIN=example.com infra/scripts/new-product.sh demo --caddy-only > /tmp/cd/conf.d/demo.caddy
+          check() { docker run --rm -e ACME_EMAIL=a@b.c -v /tmp/cd/Caddyfile:/etc/caddy/Caddyfile:ro -v /tmp/cd/global.d:/etc/caddy/global.d:ro -v /tmp/cd/servers.d:/etc/caddy/servers.d:ro -v /tmp/cd/conf.d:/etc/caddy/conf.d:ro caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile; }
+          check
+          cp infra/servers.d/cloudflare.caddy.example /tmp/cd/servers.d/cloudflare.caddy; check
       - name: Alloy config parses
         run: docker run --rm -v "$PWD/infra/monitoring/config.alloy:/c.alloy:ro" grafana/alloy:v1.10.2 fmt /c.alloy > /dev/null
       - name: Alert rules are valid YAML

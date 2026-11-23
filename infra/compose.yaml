@@ -18,6 +18,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./conf.d:/etc/caddy/conf.d:ro
       - ./global.d:/etc/caddy/global.d:ro
+      - ./servers.d:/etc/caddy/servers.d:ro
       - caddy_data:/data
       - caddy_config:/config
     networks: [infra_net]
@@ -34,8 +35,25 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make init}
+    # TLS is required for every network connection (conf/pg_hba.conf). The private key is copied to a root-owned-by-postgres 0600 file first:
+    # Postgres refuses a key that the mount shows as owned by someone else. Run scripts/make-pg-tls.sh once (make init does).
+    entrypoint:
+      - sh
+      - -c
+      - install -m 0600 -o postgres -g postgres /tls/server.key /tmp/server.key && exec docker-entrypoint.sh "$$@"
+      - --
     command:
       - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/tls/server.crt
+      - -c
+      - ssl_key_file=/tmp/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
       - -c
       - shared_buffers=${PG_SHARED_BUFFERS:-1536MB}
       - -c
@@ -48,6 +66,8 @@ services:
       - password_encryption=scram-sha-256
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./secrets/pg-tls:/tls:ro
+      - ./conf/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     networks: [infra_net]
     mem_limit: ${PG_MEM_LIMIT:-3g}
     healthcheck:

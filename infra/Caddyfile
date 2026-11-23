@@ -2,7 +2,19 @@
 	email {$ACME_EMAIL}
 	admin 127.0.0.1:2019
 	{$CADDY_GLOBAL_OPTS}
-	# Optional global settings, one file each (e.g. global.d/cloudflare.caddy: copy it from cloudflare.caddy.example behind Cloudflare)
+	# Slow-client and oversized-header limits for every site (slowloris-style connections are cut). Generous body/write times: mobile uploads.
+	# Caddy accepts ONE `servers` block, so per-host server options (Cloudflare's trusted proxies) are imported inside it from servers.d/.
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 2m
+			write 2m
+			idle 5m
+		}
+		max_header_size 32KB
+		import /etc/caddy/servers.d/*.caddy
+	}
+	# Optional global settings (not server options), one file each
 	import /etc/caddy/global.d/*.caddy
 }
 

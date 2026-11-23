@@ -15,3 +15,5 @@ infra/monitoring/.env
 *.egg-info/
 build/
 dist/
+infra/servers.d/*.caddy
+!infra/servers.d/.gitkeep
