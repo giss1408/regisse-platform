@@ -46,12 +46,12 @@ DEFAULT_PRODUCTS: dict = {
     # School management (Côte d'Ivoire). A school's staff (director, secretary, accountant/cashier) are enrolled by the product's backend
     # through /v1/service/staff; parents sign up themselves (phone-first); the platform admin runs the relay and creates the first director.
     "scolaris": {
-        "apps": {"staff": ["director", "accountant", "secretary"], "parent": ["parent"], "admin": ["platform_admin"]},
+        "apps": {"staff": ["director", "accountant", "secretary", "teacher"], "parent": ["parent"], "admin": ["platform_admin"]},
         "self_register": {"app": "parent", "role": "parent"},
         "totp_roles": ["platform_admin"],
         "admin_roles": ["platform_admin"],
         "top_admin_roles": ["platform_admin"],
-        "service_staff_roles": ["director", "accountant", "secretary"],
+        "service_staff_roles": ["director", "accountant", "secretary", "teacher"],
     },
 }
 

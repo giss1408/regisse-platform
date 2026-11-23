@@ -31,6 +31,15 @@ prometheus.scrape "fidelia" {
   forward_to      = [prometheus.remote_write.cloud.receiver]
 }
 
+// Supermarket (Django, kit adapter): the Host header is the container name, which its ALLOWED_HOSTS lists for this purpose only.
+prometheus.scrape "supermarket" {
+  targets         = [{ __address__ = "supermarket-web:8000", job = "supermarket" }]
+  metrics_path    = "/metrics"
+  bearer_token    = sys.env("SUPERMARKET_METRICS_TOKEN")
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.cloud.receiver]
+}
+
 prometheus.scrape "postgres" {
   targets    = [{ __address__ = "postgres-exporter:9187", job = "postgres" }]
   forward_to = [prometheus.remote_write.cloud.receiver]
