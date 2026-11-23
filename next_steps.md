@@ -465,3 +465,8 @@ Branch `platform/security-monitoring` (committed locally, not pushed).
 **kit:** `regisse_kit.keyring` (`VersionedCipher`: envelope with key id, header authenticated, legacy unversioned blobs read with key `0`; `VersionedHasher`: lookups try every key, current first); `codes.check` accepts codes issued under an older hash key. 8 tests; kit 67/67.
 **auth:** `app/keys.py` (rings from `AUTH_FIELD_KEYS_JSON`/`AUTH_FIELD_KEY_CURRENT`/`AUTH_HASH_KEYS_JSON`/`AUTH_HASH_KEY_CURRENT`; the old env keys are key id `0`); lookups use `IN (all keys)`; `python -m app.cli rotate-data-keys [--apply] [--verify]`; prod validator checks the rings; runbook `auth/docs/KEY_ROTATION.md`. 5 new tests (rotation, verify gate, signing key, retiring key 0, ring rules). auth **158/158**.
 **Not done:** rehearsal on a restored production dump; old backups stay under the old keys (the runbook says to keep them sealed). Residual #1 of the auth review is closed once this is deployed and a first rotation is rehearsed on staging.
+
+## Step 31: audit_log is append-only (2026-11-23)
+
+Migration `0008` + `app/audit_guard.py`: a trigger makes UPDATE and DELETE on `audit_log` raise. Verified: `alembic upgrade head` on a fresh Postgres through the real image applies 0008 and a DELETE is refused; `tests/test_audit_guard.py` passes. The full auth suite was NOT rerun after this change (the suite builds its schema with `create_all`, so it does not load the trigger, and nothing in `app` writes to `audit_log` except INSERT).
+**Limit:** the owner of the table (migration role) can still drop the trigger. Full protection needs a separate migration role and the shipped logs (infra/monitoring) as the off-host copy. TRUNCATE is not blocked.
