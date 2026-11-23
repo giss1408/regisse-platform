@@ -9,6 +9,9 @@ import time
 from datetime import date, timedelta
 from urllib.parse import parse_qs, urlsplit
 
+import struct
+import zlib
+
 import httpx
 import pyotp
 
@@ -174,10 +177,88 @@ check("the director sees it with the real reason and a message for the families 
 check("the teacher's own week shows her reason", [x.get("reason") for x in sco.get("/v1/timetable/me", headers=th).json()["cancellations"]] == ["maladie"])
 c2 = sco.post(cx, headers=th, json={"on_date": mon2.isoformat(), "reason": "formation"})
 check("she restores a session she cancelled", c2.status_code == 201 and sco.delete(f"{cx}/{mon2.isoformat()}", headers=th).status_code == 200 and len(sco.get("/v1/timetable/cancellations", headers=d).json()) == 1)
+# ---- the school lets Scolaris message families; the teacher calls the roll DURING her course
+check("the director switches automatic WhatsApp on", sco.put("/v1/school/settings", headers=d, json={"auto_whatsapp": True}).json() == {"auto_whatsapp": True})
+today = date.today()
+roll_ok = today.isoweekday() != 7
+if roll_ok:
+    # a period that started at 00:00 today (UTC, like Abidjan): the roll can be called whatever time the test runs
+    rs = sco.post(base, headers=d, json={"weekday": today.isoweekday(), "start": "00:00", "end": "07:59", "subject_id": mt, "teacher_id": tid})
+    check("the director plans a course that has started today", rs.status_code == 201, rs.text)
+    rid = rs.json()["id"]
+    pupils = sco.get(f"/v1/timetable/slots/{rid}/roll", headers=th, params={"on_date": today.isoformat()}).json()["rows"]
+    check("the teacher sees the pupils of the class, all present", [p["status"] for p in pupils] == ["present"], pupils)
+    saved = sco.put(f"/v1/timetable/slots/{rid}/roll", headers=th, json={"on_date": today.isoformat(), "entries": [{"enrollment_id": enr, "kind": "absence"}]})
+    check("she notes a pupil absent during her course", saved.status_code == 200 and saved.json()["recorded"] == 1, saved.text)
+    check("another day cannot be backdated by a teacher", sco.put(f"/v1/timetable/slots/{rid}/roll", headers=th, json={"on_date": (today - timedelta(days=7)).isoformat(), "entries": []}).json()["detail"] == "only_today")
+    logd = sco.get("/v1/messages", headers=d).json()
+    check("the family had no WhatsApp opt-in: the message is listed as 'to phone', nothing was sent",
+          [(m["kind"], m["status"], m["needs_call"]) for m in logd["items"]] == [("absence", "skipped", True)] and "au cours de Mathématiques" in logd["items"][0]["text"], logd)
+
+# ---- a replacement teacher for the cancelled session
+tp2 = "07%08d" % random.randint(10000000, 99999999)
+t2 = sco.post("/v1/staff", headers=d, json={"display_name": "Remplaçant E2E", "phone": tp2, "role": "teacher"})
+check("the director enrols a second teacher", t2.status_code == 201, t2.text)
+check("she activates by WhatsApp code", auth.post("/v1/activate", json={"phone": tp2, "code": relay_code("activation", tp2[-2:]), "password": PW}).status_code == 200)
+s4, t2tok = login(tp2, PW, "staff")
+t2h = H(t2tok["access_token"])
+sub_url = f"/v1/timetable/slots/{sid1}/cancellations/{mon.isoformat()}/substitute"
+check("the teacher herself cannot name a replacement", sco.put(sub_url, headers=th, json={"staff_id": t2.json()["id"]}).status_code == 403)
+check("the absent teacher cannot be her own replacement", sco.put(sub_url, headers=d, json={"staff_id": tid}).json()["detail"] == "substitute_is_the_teacher")
+named = sco.put(sub_url, headers=d, json={"staff_id": t2.json()["id"]})
+check("the director names the replacement of the cancelled session", named.status_code == 200 and named.json()["substitute"] == "Remplaçant E2E", named.text)
+mine2 = sco.get("/v1/timetable/me", headers=t2h).json()["substitutions"]
+check("the replacement sees the session she covers, with its date", [(x["date"], x["classroom"], x["subject"]) for x in mine2] == [(mon.isoformat(), "CM2 A", "Mathématiques")], mine2)
+check("everyone reading the class timetable sees who replaces", sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=d).json()["cancellations"][0]["substitute"] == "Remplaçant E2E")
+
+# ---- the school's logo
+def png_bytes(w=64, h=64):
+    chunk = lambda t, b: struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b))
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00")) + chunk(b"IEND", b"")
+
+logo = png_bytes()
+check("a script renamed as an image is refused", sco.put("/v1/school/logo", headers={**d, "Content-Type": "image/png"}, content=b"<svg onload=alert(1)>").json()["detail"] == "image_format")
+check("only the director sets the logo", sco.put("/v1/school/logo", headers={**th, "Content-Type": "image/png"}, content=logo).status_code == 403)
+up = sco.put("/v1/school/logo", headers={**d, "Content-Type": "image/png"}, content=logo)
+check("the director uploads the school's logo", up.status_code == 200 and up.json()["has_logo"] is True, up.text)
+got = sco.get("/v1/school/logo", headers=t2h)
+check("the school's staff download the same image, nosniff, with a validator", got.content == logo and got.headers["content-type"] == "image/png" and got.headers["x-content-type-options"] == "nosniff" and "etag" in got.headers)
+check("the app asks again and gets 'not modified'", sco.get("/v1/school/logo", headers={**d, "If-None-Match": got.headers["etag"]}).status_code == 304)
+
+# ---- the Scolaris team: subscription, reminders, guards before a block (the platform admin created at the start)
+sid_school = me.json()["school"]["id"]
+P = "/v1/platform/schools/%d" % sid_school
+check("a school's director is not the Scolaris team", sco.get("/v1/platform/schools", headers=d).json()["detail"] == "not_platform_admin")
+check("the platform admin sees the school", any(x["id"] == sid_school for x in sco.get("/v1/platform/schools", headers=adm).json()))
+started = (date.today() - timedelta(days=100)).isoformat()
+st = sco.put(P + "/subscription", headers=adm, json={"monthly_amount": 50000, "billing_day": 5, "started_on": started, "grace_days": 5})
+check("the team sets the monthly subscription: the school is late", st.status_code == 200 and st.json()["late"] is True and st.json()["overdue_months"] >= 2, st.text)
+check("she cannot block a school that was never warned", sco.post(P + "/block", headers=adm, json={"reason": "Impayé"}).json()["detail"] == "reminders_required")
+rem = sco.post(P + "/notices", headers=adm, json={"kind": "reminder"})
+check("she sends a reminder in the app", rem.status_code == 201 and "mensualité" in rem.json()["text"], rem.text)
+check("a final notice needs a block date a week ahead", sco.post(P + "/notices", headers=adm, json={"kind": "final_notice", "block_on": (today + timedelta(days=2)).isoformat()}).json()["detail"] == "block_date_too_soon")
+fin = sco.post(P + "/notices", headers=adm, json={"kind": "final_notice", "block_on": (today + timedelta(days=10)).isoformat()})
+check("she sends the final notice with the announced date", fin.status_code == 201, fin.text)
+check("the block is refused until that date has come", sco.post(P + "/block", headers=adm, json={"reason": "Impayé"}).json()["detail"] == "block_date_not_reached")
+bill = sco.get("/v1/billing", headers=d).json()
+check("the director sees the notices and what is owed in the app", [n["kind"] for n in bill["notices"]] == ["final_notice", "reminder"] and bill["standing"]["late"] is True, bill)
+check("a teacher sees no billing", sco.get("/v1/billing", headers=th).status_code == 403)
+banner = sco.get("/v1/me", headers=d).json()["billing_banner"]
+check("the banner at the top of the app says it is the final notice, with the date", banner["level"] == "final" and banner["block_on"] == (today + timedelta(days=10)).isoformat(), banner)
+nid = bill["notices"][0]["id"]
+sco.post(f"/v1/billing/notices/{nid}/seen", headers=d)
+detail = sco.get(P, headers=adm).json()
+check("the team sees the direction read the notice", detail["notices"][0]["seen_by"] == 1 and detail["notices"][0]["audience"] >= 1, detail["notices"][0])
+pay1 = sco.post(P + "/payments", headers=adm, json={"amount": 50000, "method": "wave", "reference": "WV-SUB-1"})
+check("a payment is recorded and the oldest instalment is paid first", pay1.status_code == 201 and pay1.json()["standing"]["remaining"] == st.json()["remaining"] - 50000, pay1.text)
+check("the platform audit keeps what the team did", {"subscription.set", "notice.reminder", "notice.final_notice", "subscription.payment"} <= {a["action"] for a in sco.get(f"/v1/platform/audit?school_id={sid_school}", headers=adm).json()})
+
+# ---- the WhatsApp webhook is public but verified
+check("the webhook refuses an unsigned post and a wrong handshake", sco.post("/webhooks/whatsapp", content=b"{}").status_code == 403 and sco.get("/webhooks/whatsapp", params={"hub.mode": "subscribe", "hub.verify_token": "x", "hub.challenge": "1"}).status_code == 403)
 sco.put(f"/v1/classrooms/{room['id']}/teachers", headers=d, json={"head_teacher_id": None, "assignments": []})
 check("when the director removes her, the class is closed to her again", sco.get(f"/v1/classrooms/{room['id']}/results?period=1", headers=th).json()["detail"] == "not_your_class")
 after = sco.get(f"/v1/classrooms/{room['id']}/timetable", headers=d).json()["slots"]
-check("her period stays in the timetable, now without a teacher", [(x["subject"], x["teacher"]) for x in after] == [("Mathématiques", None)], after)
+check("her periods stay in the timetable, now without a teacher", [(x["subject"], x["teacher"]) for x in after] == [("Mathématiques", None)] * (2 if roll_ok else 1), after)
 # ---- parent space (slice 4): she signs up herself at auth, the team sends the code, she sees HER child only
 pp = os.environ["PARENT_PHONE"]
 r = auth.post("/v1/register", json={"phone": pp, "password": PW, "display_name": "Traoré Moussa", "product": "scolaris", "consent": True})
@@ -189,8 +270,15 @@ ph = H(ptok["access_token"])
 kids = sco.get("/v1/parent/children", headers=ph).json()
 check("scolaris shows her child by her verified phone number", [k["name"] for k in kids] == ["Fanta TRAORÉ"] and kids[0]["balance"]["total_due"] == 85000, kids)
 ptt = sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/timetable", headers=ph).json()
-check("she reads the timetable of her child's class", [x["subject"] for x in ptt["slots"]] == ["Mathématiques"])
-check("she sees that the session is cancelled, never why", ptt["cancellations"] == [{"slot_id": sid1, "date": mon.isoformat()}] and "Grippe" not in str(ptt) and "maladie" not in str(ptt), ptt)
+check("she reads the timetable of her child's class", [x["subject"] for x in ptt["slots"]] == ["Mathématiques"] * (2 if roll_ok else 1))
+check("she sees that the session is cancelled and who replaces, never why", ptt["cancellations"] == [{"slot_id": sid1, "date": mon.isoformat(), "substitute": "Remplaçant E2E", "substitute_id": t2.json()["id"]}] and "Grippe" not in str(ptt) and "maladie" not in str(ptt), ptt)
+if roll_ok:
+    pr = sco.post(f"/v1/parent/children/{kids[0]['enrollment_id']}/absence-reports", headers=ph, json={"day": today.isoformat(), "reason": "maladie", "note": "Palu"})
+    check("the parent reports an absence for the day", pr.status_code == 201, pr.text)
+    check("the director sees what the parent told the school", [(r["name"], r["reason"]) for r in sco.get("/v1/absence-reports", headers=d).json()] == [("TRAORÉ Fanta", "maladie")])
+    ab = sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/absences", headers=ph).json()
+    check("she sees the course during which her child was noted absent", [(a["slot"], (a["course"] or {}).get("subject")) for a in ab] == [("cours", "Mathématiques")], ab)
+check("she gets the logo of her child's school and only that", sco.get(f"/v1/parent/schools/{sid_school}/logo", headers=ph).content == logo and sco.get(f"/v1/parent/schools/{sid_school + 9999}/logo", headers=ph).status_code == 404)
 check("a parent token is refused by the staff routes", sco.get("/v1/me", headers=ph).status_code == 403 and sco.get(f"/v1/arrears?year_id={year}", headers=ph).status_code == 403)
 check("she reads the report card of her child", sco.get(f"/v1/parent/children/{kids[0]['enrollment_id']}/report-card?period=1", headers=ph).json()["average"] == "15.50")
 check("the director's exports work", sco.get(f"/v1/exports/headcount?year_id={year}", headers=d).json()["total"]["total"] == 1 and sco.get(f"/v1/exports/headcount?year_id={year}&format=csv", headers=d).text.lstrip("\ufeff").startswith("Niveau;"))
